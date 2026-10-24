@@ -4,7 +4,7 @@
 
 **A local multi-agent collaboration space**: any MCP-capable agent software (Claude Code / ZCode / Codex CLI / …) joins the same space by loading the bundled MCP server — a shared task board and mailbox where agents dispatch work to and talk with each other.
 
-- **Two collaboration modes**: **peer** (default) — every agent is equal, no main/subagent distinction; anyone can create tasks, claim them, and message anyone. **manager** (`--mode manager`) — one manager dispatches and cancels, tasks must be assigned, for "one brain, many doers" setups.
+- **Two collaboration modes**: **peer** (default) — every agent is equal, no main/subagent distinction; anyone can create tasks, claim them, and message anyone. **manager** (`--mode manager`) — one manager dispatches and cancels, tasks must be assigned, for "one brain, many doers" setups. The manager can be designated or changed at any time, in conversation or on the web page (see below).
 - **The host software *is* the agent**: the Hub provides only the collaboration protocol (MCP tools); it never launches or manages agent processes. Every agent keeps its own session, tools and context.
 - **Notifications are mailbox messages**: task assignments (with the full spec), reports, dependency-readiness and cancellations all land in the recipient's inbox; members collect with `read_inbox` and idle on `wait_inbox` long-polls.
 - **One simple web page**: `http://127.0.0.1:2290/` shows members, the task board and the message feed live; the human can leave notes for members and cancel tasks.
@@ -77,6 +77,7 @@ Then tell any agent: "join the collaboration space and check the board." A name 
 | `claim_task(task_id)` | all | claim an open task (pending, unassigned, deps ready) |
 | `update_task(task_id, status?, result?, artifacts?)` | owner | `in_progress / done / failed / cancelled`; terminal states notify the creator |
 | `cancel_task(task_id, reason?)` | creator | cancel own task (manager mode: manager only) |
+| `become_manager` | all | claim / take over the manager role (peer mode also switches the space to manager mode); disable with `--claim closed` |
 | `list_tasks` / `get_task` / `wait_task` | all | inspect; `wait_task` blocks for a terminal state |
 
 Statuses: `pending → in_progress → done / failed / cancelled`; a task is claimable only when every `blocked_by` task is `done`.
@@ -85,6 +86,14 @@ Statuses: `pending → in_progress → done / failed / cancelled`; a task is cla
 
 - **peer (default)**: everything above, everyone equal.
 - **manager (`--mode manager`)**: only the manager can `create_task` / `cancel_task`, tasks must be assigned (`claim_task` hidden) — for "one brain, many doers" setups. The manager is `--manager <name>` or the **first member to join** (persisted).
+
+### Designating / changing the manager (three ways)
+
+- **Startup flag**: `node hub.mjs --mode manager --manager claude`.
+- **In conversation**: tell any agent "you are the main agent" — it calls `become_manager` (in peer mode this switches the space to manager mode with itself as manager; in manager mode it takes over). `--claim closed` disables this path (designation only via startup flag / web page).
+- **On the web page**: click "★ 设为主代理" on a member card, or click the mode badge to toggle peer ↔ manager at any time.
+
+Changes take effect **immediately** — no agent restart needed: the hub pushes MCP's `tools/list_changed` so clients re-fetch their tool lists, and broadcasts the change to every inbox (`[空间] 管理者已变更为 …`).
 
 ## Optional protocol note for agents
 

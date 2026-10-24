@@ -35,18 +35,20 @@ const C = { b: s => `\x1b[1m${s}\x1b[0m`, dim: s => `\x1b[2m${s}\x1b[0m`, cyan: 
 
 // ---------- 参数 ----------
 function parseArgs(argv) {
-  const args = { port: Number(process.env.AGENT_ROUTER_MCP_PORT) || 2290, data: null, mode: null, manager: null, reset: false };
+  const args = { port: Number(process.env.AGENT_ROUTER_MCP_PORT) || 2290, data: null, mode: null, manager: null, claim: 'open', reset: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--port') args.port = parseInt(argv[++i], 10);
     else if (a === '--data') args.data = argv[++i];
     else if (a === '--mode') args.mode = argv[++i];
     else if (a === '--manager') args.manager = argv[++i];
+    else if (a === '--claim') args.claim = argv[++i];
     else if (a === '--reset') args.reset = true;
     else if (a === '--help' || a === '-h') { usage(); process.exit(0); }
     else { console.error(`未知参数: ${a}`); usage(); process.exit(2); }
   }
   if (!['peer', 'manager'].includes(args.mode || 'peer')) { console.error(`--mode 只能是 peer 或 manager`); process.exit(2); }
+  if (!['open', 'closed'].includes(args.claim)) { console.error(`--claim 只能是 open 或 closed`); process.exit(2); }
   return args;
 }
 function usage() {
@@ -58,6 +60,7 @@ function usage() {
   --data <dir>     数据目录（默认 ./data；board.json 快照 + token）
   --mode <m>       peer（默认，平等互联）| manager（管理者模式）
   --manager <name> manager 模式下指定管理者名字（缺省：第一个加入的成员）
+  --claim <o|c>    open（默认：成员可经 become_manager 自任管理者）| closed（只许启动参数/网页指定）
   --reset          清空任务板重新开始（token 保留，MCP 配置不用改）`);
 }
 
@@ -135,7 +138,19 @@ function onChange() {
     setImmediate(() => { sseScheduled = false; sseSend({ type: 'change' }); });
   }
 }
-for (const ev of ['task:created', 'task:updated', 'message', 'peers', 'manager']) board.on(ev, onChange);
+for (const ev of ['task:created', 'task:updated', 'message', 'peers', 'manager', 'mode']) board.on(ev, onChange);
+
+// 管理者 / 模式变更 → 全员信箱广播（变更后各 MCP 服务还会经 SSE 收到 tools/list_changed）
+board.on('manager', name => {
+  if (!board.peers.length) return;
+  board.sendMessage({ from: 'hub', to: '*', content: name ? `[空间] 管理者已变更为 ${name}。` : '[空间] 管理者已卸任（当前无管理者）。' });
+});
+board.on('mode', mode => {
+  if (!board.peers.length) return;
+  board.sendMessage({ from: 'hub', to: '*', content: mode === 'manager'
+    ? `[空间] 已切换为管理者模式${board.manager ? `（管理者：${board.manager}）` : '（尚未指定管理者）'}。`
+    : '[空间] 已切回平等互联模式（人人可派活/认领）。' });
+});
 
 // ---------- HTTP ----------
 const server = http.createServer(async (req, res) => {
@@ -219,6 +234,26 @@ const server = http.createServer(async (req, res) => {
       console.log(`${C.cyan('◆ 用户')} 取消 ${t.id}`);
       return reply(200, { ok: true });
     }
+    if (req.method === 'POST' && url.pathname === '/api/manager') {
+      const b = await body();
+      if (b.name) {
+        if (!board.peer(b.name)) return reply(400, { error: `unknown peer "${b.name}"` });
+        if (board.mode !== 'manager') board.setMode('manager');
+        if (board.manager !== b.name) board.setManager(b.name);
+        console.log(`${C.cyan('◆ 用户')} 设 ${b.name} 为主代理`);
+      } else if (board.manager) {
+        board.setManager(null);
+        console.log(`${C.cyan('◆ 用户')} 卸任管理者`);
+      }
+      return reply(200, { ok: true, mode: board.mode, manager: board.manager });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/mode') {
+      const b = await body();
+      if (!['peer', 'manager'].includes(b.mode)) return reply(400, { error: 'mode must be peer or manager' });
+      if (board.mode !== b.mode) board.setMode(b.mode);
+      console.log(`${C.cyan('◆ 用户')} 切换模式 → ${b.mode}`);
+      return reply(200, { ok: true, mode: board.mode, manager: board.manager });
+    }
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
       const html = fs.readFileSync(path.join(PROJECT_ROOT, 'public', 'index.html'));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -237,7 +272,7 @@ async function handleRpc(caller, msg) {
   if (msg.method === 'tools/call') {
     const name = msg.params?.name, rpcArgs = msg.params?.arguments ?? {};
     let value;
-    try { value = await callTool(board, caller, name, rpcArgs, { mode: board.mode, manager: board.manager, waiters, onlineInfo: isOnline }); }
+    try { value = await callTool(board, caller, name, rpcArgs, { mode: board.mode, manager: board.manager, waiters, onlineInfo: isOnline, claimClosed: args.claim === 'closed' }); }
     catch (e) { value = { error: String(e.message || e) }; }
     console.log(`${C.dim(`  [${caller}] ⚙ ${name} ${JSON.stringify(rpcArgs).replace(/\s+/g, ' ').slice(0, 120)}`)}`);
     return ok({ content: [{ type: 'text', text: JSON.stringify(value, null, 1) }], ...(value?.error ? { isError: true } : {}) });
@@ -286,6 +321,7 @@ server.listen(args.port, '127.0.0.1', () => {
   console.log(`\n把下面这段加进各 Agent 软件的 MCP 配置（每个软件改一个不同的 AGENT_ROUTER_AGENT）：\n`);
   console.log(JSON.stringify({ mcpServers: { 'agent-router': { command: 'node', args: [mcpServerPath], env: sampleEnv } } }, null, 2));
   console.log(`\n${C.dim(`监控页: ${hubUrl} · token: ${tokenFile} · connect.json 已写好`)}`);
+  if (args.claim === 'closed') console.log(C.dim('（--claim closed：成员不能经 become_manager 自任管理者，只能由启动参数/网页指定）'));
 });
 
 process.on('SIGINT', () => process.exit(0));

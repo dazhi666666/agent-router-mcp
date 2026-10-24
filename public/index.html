@@ -19,6 +19,10 @@
   header h1 { font-size: 17px; margin: 0; }
   .badge { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
   .badge.mgr { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  #mode { cursor: pointer; }
+  #mode:hover { filter: brightness(1.1); outline: 1px dashed var(--accent); }
+  .mini { border: 1px solid var(--line); background: none; color: var(--accent); border-radius: 6px; font-size: 12px; padding: 1px 8px; cursor: pointer; margin-top: 4px; }
+  .mini:hover { border-color: var(--accent); }
   header .url { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 12px; }
   main { max-width: 1080px; margin: 0 auto; padding: 0 22px 60px; }
   h2 { font-size: 13px; color: var(--dim); font-weight: 600; letter-spacing: .08em; margin: 26px 0 10px; text-transform: uppercase; }
@@ -70,7 +74,7 @@
 <body>
 <header>
   <h1>Agent Router MCP · 协作空间</h1>
-  <span class="badge" id="mode"></span>
+  <span class="badge" id="mode" title="点击切换 平等互联 ↔ 管理者模式"></span>
   <span class="badge mgr" id="manager" hidden></span>
   <span class="url" id="huburl"></span>
 </header>
@@ -112,11 +116,14 @@ function render() {
   $('manager').textContent = `manager: ${state.manager}`;
   $('huburl').textContent = location.origin;
 
-  $('peers').innerHTML = state.peers.length ? state.peers.map(p => `
-    <div class="peer" title="加入于 ${esc(p.joined_at)}">
-      <div class="name"><span class="dot ${p.online ? 'on' : ''}"></span>${esc(p.name)}${p.name === state.manager && state.mode === 'manager' ? ' ★' : ''}</div>
+  $('peers').innerHTML = state.peers.length ? state.peers.map(p => {
+    const isMgr = state.mode === 'manager' && p.name === state.manager;
+    return `<div class="peer" title="加入于 ${esc(p.joined_at)}">
+      <div class="name"><span class="dot ${p.online ? 'on' : ''}"></span>${esc(p.name)}${isMgr ? ' ★' : ''}</div>
       <div class="meta">${esc([p.kind, p.label].filter(Boolean).join(' · ') || '')}${p.online ? '在线' : '离线'}</div>
-    </div>`).join('') : '<div class="empty">还没有成员加入 —— 把 hub 启动时输出的 MCP 配置加进各 Agent 软件。</div>';
+      ${isMgr ? '<div class="meta">现任主代理</div>' : `<button class="mini" data-mgr="${esc(p.name)}" title="设为主代理（空间将切换为管理者模式）">★ 设为主代理</button>`}
+    </div>`;
+  }).join('') : '<div class="empty">还没有成员加入 —— 把 hub 启动时输出的 MCP 配置加进各 Agent 软件。</div>';
 
   $('tasks').innerHTML = state.tasks.length ? `<table>
     <tr><th>任务</th><th>状态</th><th>负责人</th><th>依赖</th><th>创建</th><th>更新</th><th></th></tr>
@@ -150,6 +157,11 @@ function render() {
     await fetch('/api/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: btn.dataset.cancel }) });
     refresh();
   });
+  document.querySelectorAll('[data-mgr]').forEach(btn => btn.onclick = async () => {
+    if (!confirm(`把 ${btn.dataset.mgr} 设为主代理？（空间将切换为管理者模式，之后由它派活）`)) return;
+    await fetch('/api/manager', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: btn.dataset.mgr }) });
+    refresh();
+  });
 
   const sel = $('to');
   const cur = sel.value;
@@ -179,6 +191,14 @@ $('send').onsubmit = async e => {
     flash.className = 'flash'; flash.textContent = `已投递到 ${$('to').value} 的信箱（${j.id}）`;
   } catch (err) { flash.className = 'flash err'; flash.textContent = `发送失败: ${err.message}`; }
   setTimeout(() => { flash.textContent = ''; }, 4000);
+  refresh();
+};
+
+$('mode').onclick = async () => {
+  if (!state) return;
+  const next = state.mode === 'peer' ? 'manager' : 'peer';
+  if (!confirm(next === 'manager' ? '切换为管理者模式？（之后由主代理派活；可在成员卡片上指定）' : '切回平等互联模式？（人人可派活/认领）')) return;
+  await fetch('/api/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: next }) });
   refresh();
 };
 

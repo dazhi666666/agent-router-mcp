@@ -80,6 +80,10 @@ export const TOOL_SCHEMAS = {
       required: ['task_id']
     }
   },
+  become_manager: {
+    description: `Take over as the manager of this space. In peer mode this switches the whole space to manager mode with you as manager; in manager mode it transfers manager-ship to you (or confirms you already have it). Only call this when the user explicitly asks you to lead ("you are the main agent") — never on your own initiative.`,
+    inputSchema: { type: 'object', properties: {} }
+  },
   list_tasks: {
     description: 'List every task on the board with status, assignee, ready (dependencies satisfied), and a result preview.',
     inputSchema: { type: 'object', properties: {} }
@@ -219,6 +223,17 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
       if (TERMINAL.has(t.status)) return { error: `task ${t.id} is already ${t.status}` };
       board.updateTask(t.id, { status: 'cancelled', result: `Cancelled: ${args.reason || `by ${caller}`}` }, caller);
       return { ok: true, id: t.id, status: 'cancelled' };
+    }
+    case 'become_manager': {
+      if (ctx.claimClosed) return { error: 'manager self-claim is disabled on this hub (--claim closed); ask the human to designate the manager on the board page or via --manager' };
+      if (mode === 'manager') {
+        if (caller === manager) return { ok: true, mode, manager: caller, note: 'you are already the manager' };
+        board.setManager(caller);
+        return { ok: true, mode, manager: caller, note: `you are now the manager (took over from ${manager || 'nobody'})` };
+      }
+      board.setMode('manager');
+      board.setManager(caller);
+      return { ok: true, mode: 'manager', manager: caller, note: 'space switched to manager mode with you as manager; other members can no longer create tasks' };
     }
     case 'list_tasks':
       return board.tasks.map(t => ({

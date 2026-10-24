@@ -92,6 +92,12 @@ export class Board extends EventEmitter {
     this.emit('manager', name);
   }
 
+  setMode(mode) {
+    this.mode = mode;
+    this.save();
+    this.emit('mode', mode);
+  }
+
   /** 注册/更新成员（重连时刷新 kind/label）；在线状态由 Hub 维护 */
   registerPeer({ name, kind = '', label = '' }) {
     const p = this.peer(name);

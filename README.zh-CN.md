@@ -4,7 +4,7 @@
 
 **本地多 Agent 协作空间**：任何支持 MCP 的 Agent 软件（Claude Code / ZCode / Codex CLI / Devin / OpenCode / …）加载随附的 MCP 服务，即加入同一个空间，共享任务板与信箱，互相派活与对话。
 
-- **两种协作模式**：**平等互联**（peer，默认）——所有 Agent 平权，不区分主代理和子代理，任何人都能发任务、认领、发消息；**管理者模式**（`--mode manager`）——一个管理者负责派活与取消，任务必须指派，适合"一个主脑带一群执行者"。
+- **两种协作模式**：**平等互联**（peer，默认）——所有 Agent 平权，不区分主代理和子代理，任何人都能发任务、认领、发消息；**管理者模式**（`--mode manager`）——一个管理者负责派活与取消，任务必须指派，适合"一个主脑带一群执行者"。主代理可随时在对话或网页中指定、更换（见下）。
 - **宿主软件自己就是 agent**：Hub 只提供协作协议（MCP 工具），不启动、不管理任何 agent 进程；每个 Agent 保持自己的会话、工具与上下文。
 - **通知即信箱**：任务指派（含完整 spec）、完成报告、依赖就绪、取消，都会成为收件人信箱里的一条消息；成员用 `read_inbox` 收、用 `wait_inbox` 长轮询待命。
 - **简单监控页**：`http://127.0.0.1:2290/` 实时显示成员、任务板、消息流，人可以在页面上给成员留言、取消任务（human in the loop）。
@@ -77,6 +77,7 @@ node hub.mjs
 | `claim_task(task_id)` | 所有成员 | 认领开放任务（pending 且未指派且依赖就绪） |
 | `update_task(task_id, status?, result?, artifacts?)` | 任务负责人 | `in_progress / done / failed / cancelled`；终态自动通知创建者 |
 | `cancel_task(task_id, reason?)` | 创建者 | 取消自己创建的任务（管理者模式：仅 manager） |
+| `become_manager` | 所有成员 | 自任/接任管理者（peer 模式下同时把空间切为管理者模式）；`--claim closed` 可禁用 |
 | `list_tasks` / `get_task` / `wait_task` | 所有成员 | 查看任务；`wait_task` 阻塞等任务终态（代替轮询） |
 
 任务状态：`pending → in_progress → done / failed / cancelled`；`blocked_by` 里全部 `done` 之前不能认领（依赖失败/取消则视为被挡）。
@@ -85,6 +86,14 @@ node hub.mjs
 
 - **peer（默认，平等互联）**：上表即全部语义，人人平权。
 - **manager（`--mode manager`）**：只有管理者能 `create_task` / `cancel_task`，任务必须指派（`claim_task` 下线），适合"一个主脑带一群执行者"的用法。管理者 = `--manager <名字>`，缺省为**第一个加入的成员**（持久化在 board.json）。
+
+### 指定 / 更换主代理（三种方式）
+
+- **启动参数**：`node hub.mjs --mode manager --manager claude`。
+- **对话指定**：对任一 agent 说"你来当主代理"，它调用 `become_manager` 即可——peer 模式下会把空间切成管理者模式并自任管理者，manager 模式下则是接任。加 `--claim closed` 可禁用这条入口（防止 agent 自封，只许启动参数/网页指定）。
+- **网页指定**：监控页成员卡片上点"★ 设为主代理"，或点顶部模式徽章随时切换 平等 ↔ 管理者。
+
+变更**即时生效**，无需重启 agent 会话：Hub 通过 MCP 的 `tools/list_changed` 通知各客户端重新拉取工具表，并向全员信箱广播变更（`[空间] 管理者已变更为 …`）。
 
 ## 给 Agent 的协作提示词（可选）
 

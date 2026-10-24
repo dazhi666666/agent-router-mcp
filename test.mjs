@@ -137,6 +137,69 @@ test('tools：wait_task / wait_inbox 长轮询（异步路径 + 超时）', asyn
   assert.equal(board.inbox('bob', { unreadOnly: true }).length, 0); // wait_inbox 顺手标记已读
 });
 
+test('tools：become_manager——peer 自任并切模式、接任、幂等、--claim closed 拒绝', t => {
+  const board = new Board(path.join(tmp(t), 'b.json'));
+  board.registerPeer({ name: 'alice' });
+  board.registerPeer({ name: 'bob' });
+
+  const r1 = callTool(board, 'alice', 'become_manager', {}, { mode: 'peer', manager: null });
+  assert.equal(r1.ok, true);
+  assert.equal(r1.mode, 'manager');
+  assert.equal(board.mode, 'manager');
+  assert.equal(board.manager, 'alice');
+
+  const r2 = callTool(board, 'bob', 'become_manager', {}, { mode: 'manager', manager: 'alice' });
+  assert.equal(r2.manager, 'bob');
+  assert.equal(board.manager, 'bob');
+
+  const r3 = callTool(board, 'bob', 'become_manager', {}, { mode: 'manager', manager: 'bob' });
+  assert.match(r3.note, /already/);
+
+  const r4 = callTool(board, 'alice', 'become_manager', {}, { mode: 'peer', manager: null, claimClosed: true });
+  assert.match(r4.error, /--claim closed/);
+
+  assert.ok(toolsFor('alice', { mode: 'manager', manager: 'bob' }).some(x => x.name === 'become_manager'));
+});
+
+test('hub：网页指定主代理 / 切换模式 / become_manager 接任，广播与工具表即时过滤', async t => {
+  const hub = await startHub(t);
+  await reg(hub, 'alice');
+  await reg(hub, 'bob');
+
+  // 网页一键：设 alice 为主代理（同时切管理者模式）
+  assert.equal((await post(hub.url, '/api/manager', { name: 'alice' })).status, 200);
+  let state = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.equal(state.mode, 'manager');
+  assert.equal(state.manager, 'alice');
+  let names = (await rpc(hub, 'bob', 'tools/list')).tools.map(x => x.name);
+  assert.ok(!names.includes('create_task') && names.includes('become_manager'));
+
+  // 变更广播进 bob 信箱
+  const inbox = await call(hub, 'bob', 'read_inbox', {});
+  assert.ok(inbox.some(m => /管理者已变更为 alice/.test(m.content)));
+
+  // 对话指定：bob 经 become_manager 接任
+  await call(hub, 'bob', 'become_manager', {});
+  state = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.equal(state.manager, 'bob');
+
+  // 网页切回平等模式：bob 的工具表恢复 create_task
+  assert.equal((await post(hub.url, '/api/mode', { mode: 'peer' })).status, 200);
+  state = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.equal(state.mode, 'peer');
+  names = (await rpc(hub, 'bob', 'tools/list')).tools.map(x => x.name);
+  assert.ok(names.includes('create_task'));
+
+  assert.equal((await post(hub.url, '/api/manager', { name: 'ghost' })).status, 400);
+  assert.equal((await post(hub.url, '/api/mode', { mode: 'chaos' })).status, 400);
+
+  // --claim closed：自封被拒
+  const hub2 = await startHub(t, ['--claim', 'closed']);
+  await reg(hub2, 'alice');
+  const res = await post(hub2.url, '/rpc', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'become_manager', arguments: {} } }, { ...auth(hub2), 'X-Agent': 'alice' });
+  assert.match(JSON.parse(res.json.result.content[0].text).error, /--claim closed/);
+});
+
 test('tools：manager 模式——create/cancel 仅管理者，任务必须指派，claim 不可用', t => {
   const board = new Board(path.join(tmp(t), 'b.json'));
   board.registerPeer({ name: 'alice' });
@@ -188,6 +251,31 @@ const call = async (hub, agent, name, args = {}) => {
   const res = await rpc(hub, agent, 'tools/call', { name, arguments: args });
   assert.equal(res.isError, undefined, `${name} → ${res.content?.[0]?.text}`);
   return JSON.parse(res.content[0].text);
+};
+
+// 起 mcp-server.mjs 子进程，返回逐行读 stdout 的句柄（MCP stdio 端到端用）
+const spawnMcp = (t, hub, name = 'claude-dev', kind = 'claude') => {
+  const child = spawn(process.execPath, [path.join(ROOT, 'mcp-server.mjs')], {
+    env: { ...process.env, AGENT_ROUTER_HUB_URL: hub.url, AGENT_ROUTER_TOKEN: hub.token, AGENT_ROUTER_AGENT: name, AGENT_ROUTER_KIND: kind },
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  let stderr = '';
+  child.stderr.on('data', d => { stderr += d; });
+  const waiters = [];
+  let buf = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', d => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      const w = waiters.shift();
+      if (w) w(line);
+    }
+  });
+  t.after(() => { try { child.kill(); } catch {} });
+  return { child, nextLine: () => new Promise(resolve => waiters.push(resolve)), send: obj => child.stdin.write(JSON.stringify(obj) + '\n'), stderr: () => stderr };
 };
 
 test('hub：注册命名——新名字、在线重名加后缀、离线重名回收、token/身份校验', async t => {
@@ -309,28 +397,8 @@ test('hub：SSE 推送变更', async t => {
 // ---------- MCP stdio 端到端 ----------
 test('MCP stdio 端到端：initialize → tools/list → tools/call → Hub 上可见；stdin 关闭即退出', async t => {
   const hub = await startHub(t);
-  const child = spawn(process.execPath, [path.join(ROOT, 'mcp-server.mjs')], {
-    env: { ...process.env, AGENT_ROUTER_HUB_URL: hub.url, AGENT_ROUTER_TOKEN: hub.token, AGENT_ROUTER_AGENT: 'claude-dev', AGENT_ROUTER_KIND: 'claude' },
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
-  let stderr = '';
-  child.stderr.on('data', d => { stderr += d; });
-  const waiters = [];
-  let buf = '';
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', d => {
-    buf += d;
-    let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i);
-      buf = buf.slice(i + 1);
-      const w = waiters.shift();
-      if (w) w(line);
-    }
-  });
-  const nextLine = () => new Promise(resolve => waiters.push(resolve));
-  const send = obj => child.stdin.write(JSON.stringify(obj) + '\n');
-  t.after(() => { try { child.kill(); } catch {} });
+  const mcp = spawnMcp(t, hub, 'claude-dev');
+  const send = mcp.send, nextLine = mcp.nextLine;
 
   send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
   const init = JSON.parse(await nextLine());
@@ -349,8 +417,32 @@ test('MCP stdio 端到端：initialize → tools/list → tools/call → Hub 上
   assert.ok(state.peers.some(p => p.name === 'claude-dev' && p.kind === 'claude'));
   assert.equal(state.tasks[0].created_by, 'claude-dev');
 
-  child.stdin.end();
-  const closed = await Promise.race([new Promise(r => child.once('exit', r)), sleep(4000).then(() => 'timeout')]);
-  assert.notEqual(closed, 'timeout', `stdin 关闭后未退出；stderr: ${stderr}`);
-  assert.match(stderr, /joined as "claude-dev"/);
+  mcp.child.stdin.end();
+  const closed = await Promise.race([new Promise(r => mcp.child.once('exit', r)), sleep(4000).then(() => 'timeout')]);
+  assert.notEqual(closed, 'timeout', `stdin 关闭后未退出；stderr: ${mcp.stderr()}`);
+  assert.match(mcp.stderr(), /joined as "claude-dev"/);
+});
+
+test('MCP：管理者/模式变更 → 宿主收到 tools/list_changed 推送（权限即时生效）', async t => {
+  const hub = await startHub(t);
+  const mcp = spawnMcp(t, hub, 'claude-dev');
+
+  mcp.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
+  const init = JSON.parse(await mcp.nextLine());
+  assert.equal(init.result.capabilities.tools.listChanged, true);
+  mcp.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  await mcp.nextLine(); // 触发注册，watcher 以 peer 基线启动
+  await sleep(300);
+  await post(hub.url, '/api/manager', { name: 'claude-dev' });
+
+  const deadline = Date.now() + 5000;
+  let seen = null;
+  while (!seen && Date.now() < deadline) {
+    const line = await Promise.race([mcp.nextLine(), sleep(400).then(() => null)]);
+    if (line?.includes('tools/list_changed')) seen = line;
+  }
+  assert.ok(seen, '未收到 tools/list_changed 推送');
+  const state = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.equal(state.mode, 'manager');
+  assert.equal(state.manager, 'claude-dev');
 });

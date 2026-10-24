@@ -26,6 +26,63 @@ if (!TOKEN) console.error('[agent-router-mcp] AGENT_ROUTER_TOKEN 未设置：先
 let me = null;            // Hub 分配的身份（重名时会加后缀）
 let registering = null;
 let heartbeat = null;
+let watchStarted = false;
+let lastIdentity = null;  // { mode, manager }，用于检测权限变化 → tools/list_changed
+
+function httpGetJson(p) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(`${HUB}${p}`, res => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', d => { text += d; });
+      res.on('end', () => { try { resolve(JSON.parse(text)); } catch (e) { reject(e); } });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(8000, () => req.destroy(new Error('timeout')));
+    req.on('socket', s => s.unref());
+  });
+}
+
+/** 管理者 / 模式变更 → 通知宿主重拉工具表（权限即时生效，不用重启会话） */
+async function checkIdentityChange() {
+  if (!lastIdentity) return;
+  try {
+    const s = await httpGetJson('/api/state');
+    const cur = { mode: s.mode, manager: s.manager || null };
+    if (cur.mode !== lastIdentity.mode || cur.manager !== lastIdentity.manager)
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }) + '\n');
+    lastIdentity = cur;
+  } catch {}
+}
+
+function startWatcher() {
+  if (watchStarted) return;
+  watchStarted = true;
+  const schedule = () => { const t = setTimeout(connect, 5000); t.unref?.(); };
+  const connect = () => {
+    if (!watchStarted) return;
+    const req = http.get(`${HUB}/api/events`, res => {
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', d => {
+        buf += d;
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+          const line = frame.split('\n').find(l => l.startsWith('data:'));
+          if (!line) continue;
+          try { const ev = JSON.parse(line.slice(5).trim()); if (ev.type === 'change' || ev.type === 'hello') checkIdentityChange(); } catch {}
+        }
+      });
+      res.on('end', schedule);
+      res.on('error', schedule);
+    });
+    req.on('error', schedule);
+    req.on('socket', s => s.unref());
+  };
+  connect();
+}
 
 function post(p, bodyObj) {
   return new Promise((resolve, reject) => {
@@ -59,6 +116,8 @@ async function register() {
   me = r.json.name;
   if (!heartbeat) heartbeat = setInterval(() => { post('/heartbeat', { name: me }).catch(() => {}); }, 15_000);
   heartbeat.unref?.();
+  lastIdentity = { mode: r.json.mode, manager: r.json.manager || null };
+  startWatcher();
   console.error(`[agent-router-mcp] joined as "${me}" (${r.json.mode} mode${r.json.manager ? `, manager: ${r.json.manager}` : ''}) → ${HUB}`);
   return r.json;
 }
@@ -90,7 +149,7 @@ async function handleMessage(msg) {
   if (msg.method === 'initialize')
     return { jsonrpc: '2.0', id: msg.id, result: {
       protocolVersion: msg.params?.protocolVersion ?? '2025-06-18',
-      capabilities: { tools: { listChanged: false } },
+      capabilities: { tools: { listChanged: true } },
       serverInfo: SERVER_INFO
     } };
   if (msg.method === 'ping') return { jsonrpc: '2.0', id: msg.id, result: {} };
