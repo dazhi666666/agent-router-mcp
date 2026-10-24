@@ -11,6 +11,8 @@
 
 Zero dependencies (Node ≥ 20, built-ins only). All data stays on your machine.
 
+> **Capability boundary**: the Hub never invokes or manages CLI processes, so this project **cannot spawn agents from zero** — there is no headless launching of other CLIs; members must be configured and started by a human. If you need "agent spawns agent" (a manager deriving subagent sessions automatically), use [Agent Router](https://github.com/dazhi666666/agent-router): its Router process launches and manages the CLIs, and the manager creates subagent sessions from scratch with `create_task`.
+
 ## Architecture
 
 ```
@@ -120,6 +122,7 @@ node --test test.mjs
 
 ## Known limitations
 
+- **Cannot spawn agents from zero** (see "Capability boundary" above): the Hub never invokes CLIs, so members must be created and started by a human. For "agent spawns agent", use [Agent Router](https://github.com/dazhi666666/agent-router).
 - Notifications rely on members collecting their inbox; the tool descriptions (and the protocol note above) exist for that reason.
 - No task timeouts: an unclaimed open task stays pending forever (cancel it from the page).
 - The hub is a single point: the board and roster survive restarts, long-polls reconnect on the next tool call.

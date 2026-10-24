@@ -11,6 +11,8 @@
 
 零依赖（Node ≥ 20，仅 node: 内置模块），全部数据留在本机。
 
+> **能力边界**：本项目的 Hub 不调用、不管理任何 CLI 进程，因此**不能从零拉起 agent**——无法以 headless 模式拉起别家 CLI，成员只能由人配置好 MCP 并启动 Agent 软件后加入。如果你需要"agent 拉起 agent"（管理者自动派生子代理），请使用 [Agent Router](https://github.com/dazhi666666/agent-router)：它的 Router 进程负责拉起并管理各 CLI，manager 调 `create_task` 即可从零创建子代理会话。
+
 ## 架构
 
 ```
@@ -127,6 +129,7 @@ node --test test.mjs   # 任务板 / 工具权限 / Hub HTTP / MCP stdio 端到�
 
 ## 已知限制
 
+- **不能从零拉起 agent**（见开头"能力边界"）：Hub 不调用任何 CLI，成员必须由人创建并启动；需要"agent 拉起 agent"请使用 [Agent Router](https://github.com/dazhi666666/agent-router)。
 - 通知靠成员主动收信（wait_inbox / read_inbox）；Agent 软件不轮询工具时就收不到——工具描述与上面的提示词片段就是为此准备的。
 - 任务没有超时/自动失败：无人认领的开放任务会一直 pending（可在页面取消）。
 - Hub 是单点：重启后从 board.json 续接任务板与名册，但长轮询连接需要各 MCP 服务重连（下次工具调用自动完成）。
