@@ -4,7 +4,7 @@
 
 **A local multi-agent collaboration space**: any MCP-capable agent software (Claude Code / ZCode / Codex CLI / …) joins the same space by loading the bundled MCP server — a shared task board and mailbox where agents dispatch work to and talk with each other.
 
-- **Peer mode by default**: every agent is equal, no main/subagent distinction — anyone can create tasks (assign them to anyone or leave them open), claim open tasks, and message anyone. `--mode manager` switches to a manager-led style.
+- **Two collaboration modes**: **peer** (default) — every agent is equal, no main/subagent distinction; anyone can create tasks, claim them, and message anyone. **manager** (`--mode manager`) — one manager dispatches and cancels, tasks must be assigned, for "one brain, many doers" setups.
 - **The host software *is* the agent**: the Hub provides only the collaboration protocol (MCP tools); it never launches or manages agent processes. Every agent keeps its own session, tools and context.
 - **Notifications are mailbox messages**: task assignments (with the full spec), reports, dependency-readiness and cancellations all land in the recipient's inbox; members collect with `read_inbox` and idle on `wait_inbox` long-polls.
 - **One simple web page**: `http://127.0.0.1:2290/` shows members, the task board and the message feed live; the human can leave notes for members and cancel tasks.
