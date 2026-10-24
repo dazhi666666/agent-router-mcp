@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Router MCP · 协作空间</title>
+<style>
+  :root {
+    --bg: #f6f4ef; --panel: #fffdf8; --line: #e5dfd2; --text: #2c2a24; --dim: #8a8577;
+    --accent: #b0762c; --accent-soft: #f3e7d3; --ok: #2e7d43; --bad: #b3403a; --warn: #a8741a;
+    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #191713; --panel: #201d18; --line: #35302a; --text: #e8e3d8; --dim: #8f887a; --accent: #d8a35c; --accent-soft: #2f2820; --ok: #6fbf83; --bad: #e07a72; --warn: #d8a35c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 22px 10px; }
+  header h1 { font-size: 17px; margin: 0; }
+  .badge { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+  .badge.mgr { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  header .url { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 0 22px 60px; }
+  h2 { font-size: 13px; color: var(--dim); font-weight: 600; letter-spacing: .08em; margin: 26px 0 10px; text-transform: uppercase; }
+  .empty { color: var(--dim); padding: 14px 0; font-style: italic; }
+
+  .peers { display: flex; flex-wrap: wrap; gap: 10px; }
+  .peer { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; min-width: 130px; }
+  .peer .name { font-weight: 600; }
+  .peer .meta { font-size: 12px; color: var(--dim); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--dim); vertical-align: 1px; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 60%, transparent); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  th { text-align: left; font-size: 12px; color: var(--dim); font-weight: 600; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr.task { cursor: pointer; }
+  tr.task:hover td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+  tr.detail td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+  .id { font-family: var(--mono); color: var(--accent); white-space: nowrap; }
+  .st { font-size: 12px; padding: 1px 9px; border-radius: 999px; white-space: nowrap; }
+  .st.pending { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+  .st.in_progress { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .st.done { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .st.failed, .st.cancelled { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+  .blocked { color: var(--dim); font-size: 12px; }
+  .cancel-btn { border: 1px solid var(--line); background: none; color: var(--bad); border-radius: 6px; font-size: 12px; padding: 1px 8px; cursor: pointer; }
+  .cancel-btn:hover { border-color: var(--bad); }
+  .detail pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0; font-family: inherit; }
+  .detail .k { color: var(--dim); font-size: 12px; margin-top: 8px; }
+
+  .msg { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 14px; margin-bottom: 8px; }
+  .msg .head { font-size: 12px; color: var(--dim); margin-bottom: 2px; }
+  .msg .head b { color: var(--text); font-weight: 600; }
+  .msg .body { white-space: pre-wrap; word-break: break-word; }
+  .msg.broadcast { border-left: 3px solid var(--warn); }
+  .msg.system { border-left: 3px solid var(--accent); }
+
+  form { display: flex; gap: 8px; align-items: flex-start; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  select, textarea, button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  select { padding: 6px 8px; }
+  textarea { flex: 1; min-height: 44px; resize: vertical; padding: 6px 10px; }
+  button.send { padding: 6px 18px; background: var(--accent); border-color: var(--accent); color: #fff; cursor: pointer; }
+  button.send:hover { filter: brightness(1.08); }
+  .flash { margin-top: 8px; font-size: 12px; color: var(--ok); min-height: 18px; }
+  .flash.err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Router MCP · 协作空间</h1>
+  <span class="badge" id="mode"></span>
+  <span class="badge mgr" id="manager" hidden></span>
+  <span class="url" id="huburl"></span>
+</header>
+<main>
+  <h2>成员</h2>
+  <div class="peers" id="peers"></div>
+
+  <h2>任务板</h2>
+  <div id="tasks"></div>
+
+  <h2>给成员留言</h2>
+  <form id="send">
+    <select id="to"></select>
+    <textarea id="content" placeholder="写给成员的消息（出现在对方信箱；人类以 user 身份发言）…"></textarea>
+    <button class="send" type="submit">发送</button>
+  </form>
+  <div class="flash" id="flash"></div>
+
+  <h2>消息流</h2>
+  <div id="msgs"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtTime = iso => { const d = new Date(iso), diff = (Date.now() - d) / 1000;
+  if (diff < 60) return '刚刚'; if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`; return d.toLocaleString('zh-CN', { hour12: false }); };
+const STATUS_CN = { pending: '待处理', in_progress: '进行中', done: '已完成', failed: '失败', cancelled: '已取消' };
+let state = null, expanded = new Set();
+
+async function refresh() {
+  try { state = await (await fetch('/api/state')).json(); render(); } catch {}
+}
+
+function render() {
+  if (!state) return;
+  $('mode').textContent = state.mode === 'manager' ? '管理者模式' : '平等互联模式';
+  $('manager').hidden = !(state.mode === 'manager' && state.manager);
+  $('manager').textContent = `manager: ${state.manager}`;
+  $('huburl').textContent = location.origin;
+
+  $('peers').innerHTML = state.peers.length ? state.peers.map(p => `
+    <div class="peer" title="加入于 ${esc(p.joined_at)}">
+      <div class="name"><span class="dot ${p.online ? 'on' : ''}"></span>${esc(p.name)}${p.name === state.manager && state.mode === 'manager' ? ' ★' : ''}</div>
+      <div class="meta">${esc([p.kind, p.label].filter(Boolean).join(' · ') || '')}${p.online ? '在线' : '离线'}</div>
+    </div>`).join('') : '<div class="empty">还没有成员加入 —— 把 hub 启动时输出的 MCP 配置加进各 Agent 软件。</div>';
+
+  $('tasks').innerHTML = state.tasks.length ? `<table>
+    <tr><th>任务</th><th>状态</th><th>负责人</th><th>依赖</th><th>创建</th><th>更新</th><th></th></tr>
+    ${state.tasks.map(t => {
+      const isOwnerPending = ['pending', 'in_progress'].includes(t.status);
+      const detail = expanded.has(t.id);
+      return `<tr class="task" data-id="${t.id}">
+        <td><span class="id">${t.id}</span> ${esc(t.title)}</td>
+        <td><span class="st ${t.status}">${STATUS_CN[t.status] || t.status}</span></td>
+        <td>${t.assignee ? esc(t.assignee) : '<span class="blocked">待认领</span>'}</td>
+        <td>${(t.blocked_by || []).length ? `<span class="blocked">${esc(t.blocked_by.join(', '))}${t.ready ? ' ✓' : ''}</span>` : '—'}</td>
+        <td class="blocked">${esc(t.created_by)}</td>
+        <td class="blocked" title="${esc(t.updated_at)}">${fmtTime(t.updated_at)}</td>
+        <td>${isOwnerPending ? `<button class="cancel-btn" data-cancel="${t.id}">取消</button>` : ''}</td>
+      </tr>` + (detail ? `<tr class="detail"><td colspan="7">
+          ${t.spec ? `<div class="k">任务说明</div><pre>${esc(t.spec)}</pre>` : ''}
+          ${t.result ? `<div class="k">结果 / 报告</div><pre>${esc(t.result)}</pre>` : ''}
+          ${(t.artifacts || []).length ? `<div class="k">产物</div><pre>${esc(t.artifacts.join('\n'))}</pre>` : ''}
+        </td></tr>` : '');
+    }).join('')}</table>` : '<div class="empty">任务板为空。</div>';
+
+  document.querySelectorAll('tr.task').forEach(tr => tr.onclick = e => {
+    if (e.target.dataset.cancel) return;
+    const id = tr.dataset.id;
+    expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+    render();
+  });
+  document.querySelectorAll('[data-cancel]').forEach(btn => btn.onclick = async e => {
+    e.stopPropagation();
+    if (!confirm(`取消任务 ${btn.dataset.cancel}？`)) return;
+    await fetch('/api/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: btn.dataset.cancel }) });
+    refresh();
+  });
+
+  const sel = $('to');
+  const cur = sel.value;
+  sel.innerHTML = ['*', ...state.peers.map(p => p.name)].map(n =>
+    `<option value="${esc(n)}">${n === '*' ? '所有人 (*)' : esc(n)}</option>`).join('');
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+
+  const msgs = [...state.messages].reverse().slice(0, 300);
+  $('msgs').innerHTML = msgs.length ? msgs.map(m => `
+    <div class="msg ${m.to === '*' ? 'broadcast' : ''} ${m.from === 'hub' || m.from === 'user' ? 'system' : ''}">
+      <div class="head"><b>${esc(m.from)}</b> → ${m.to === '*' ? '所有人' : esc(m.to)}${m.task_id ? ` · <span class="id">${esc(m.task_id)}</span>` : ''} · ${fmtTime(m.ts)}</div>
+      <div class="body">${esc(m.content)}</div>
+    </div>`).join('') : '<div class="empty">还没有消息。</div>';
+}
+
+$('send').onsubmit = async e => {
+  e.preventDefault();
+  const content = $('content').value.trim();
+  if (!content) return;
+  const flash = $('flash');
+  try {
+    const r = await fetch('/api/message', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: $('to').value, content }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    $('content').value = '';
+    flash.className = 'flash'; flash.textContent = `已投递到 ${$('to').value} 的信箱（${j.id}）`;
+  } catch (err) { flash.className = 'flash err'; flash.textContent = `发送失败: ${err.message}`; }
+  setTimeout(() => { flash.textContent = ''; }, 4000);
+  refresh();
+};
+
+const es = new EventSource('/api/events');
+es.onmessage = e => { if (JSON.parse(e.data).type === 'change') refresh(); };
+es.onerror = () => {};
+setInterval(refresh, 15000);
+refresh();
+</script>
+</body>
+</html>

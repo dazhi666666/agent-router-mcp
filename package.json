@@ -1,0 +1,16 @@
+{
+  "name": "agent-router-mcp",
+  "version": "0.1.0",
+  "description": "Agent Router MCP — 本地多 Agent 协作空间：任意 Agent 软件通过 MCP 加入，共享任务板与信箱，平等互联",
+  "type": "module",
+  "bin": {
+    "agent-router-mcp-hub": "hub.mjs",
+    "agent-router-mcp": "mcp-server.mjs"
+  },
+  "scripts": {
+    "hub": "node hub.mjs",
+    "test": "node --test test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}
