@@ -63,12 +63,13 @@ node hub.mjs
 - **ZCode**：客户端设置里的 MCP 服务器配置（同样格式）
 - **Codex CLI**：`~/.codex/config.toml` 的 `[mcp_servers.agent-router]`（`command` / `args` / `env`）
 
-然后对任一 agent 说"加入协作空间，看看有什么任务"即可。成员第一次注册时若与**离线**成员重名会复用其名字（重启场景），与**在线**成员重名自动加后缀（`claude-2`，同软件多开会话互不干扰）。
+装好 MCP **并不等于加入**——加入是 opt-in 的，agent 只在你明确叫它加入时才会加入。对它说"加入协作空间"，它调用 `join_space` 后才成为成员（拿到分配的名字和完整工具集；在此之前它不注册、不占名、不心跳，Hub 和监控页上都看不到它，同一软件的其他对话完全不受影响）。重名规则：与**离线**成员重名会复用其名字（重启场景），与**在线**成员重名自动加后缀（`claude-2`）。想让某个软件装上即自动加入，设 `AGENT_ROUTER_AUTOJOIN=1`。
 
 ## 工具一览
 
 | 工具 | 谁可用 | 作用 |
 |---|---|---|
+| `join_space` | 未加入的 agent | 加入协作空间（仅在被用户明确要求时调用）；加入前工具表里只有这一个工具 |
 | `get_roster` | 所有成员 | 我是谁、模式、成员与在线状态 |
 | `send_message(to, content, task_id?)` | 所有成员 | 发给某成员 / `user`（人类）/ `*`（广播） |
 | `read_inbox` | 所有成员 | 收信并标记已读（指派通知、任务报告、同伴消息、人类留言） |
@@ -101,7 +102,7 @@ node hub.mjs
 
 ```markdown
 ## Agent Router MCP 协作协议
-- 加入后先 get_roster 认识大家；没有别的活时用 wait_inbox 待命（循环调用）。
+- 被用户要求加入时调用 join_space；加入后先 get_roster 认识大家；没有别的活时用 wait_inbox 待命（循环调用）。
 - 收到 [任务] 指派：直接开工（已 in_progress），完成后必须 update_task(status="done", result=完整报告)；
   做不下去就 status="failed" 说明原因。
 - 大活拆给同伴：create_task，spec 按零上下文同事来写（目标/相关文件/约束/如何验证）；等结果用 wait_task。
@@ -124,6 +125,7 @@ node hub.mjs
 | `AGENT_ROUTER_HUB_URL` | Hub 地址（默认 `http://127.0.0.1:2290`） |
 | `AGENT_ROUTER_TOKEN` | 连接令牌（必填；`data/token`，也见 `data/connect.json`） |
 | `AGENT_ROUTER_AGENT` | 成员名（默认 `agent`；重名规则见上） |
+| `AGENT_ROUTER_AUTOJOIN` | 设为 1：MCP 一连上就自动加入（默认关闭：需 agent 调用 `join_space` 才加入） |
 | `AGENT_ROUTER_KIND` / `AGENT_ROUTER_LABEL` | 类型标签 / 展示名（可选） |
 
 **数据布局**（`--data` 目录）：`board.json` 任务板快照（Hub 重启续接）、`token` 连接令牌、`connect.json` `{url, token}`。

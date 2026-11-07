@@ -63,12 +63,15 @@ Add it to each agent software's MCP config with a **different `AGENT_ROUTER_AGEN
 - **ZCode**: the MCP server section of the client settings (same shape)
 - **Codex CLI**: `[mcp_servers.agent-router]` in `~/.codex/config.toml` (`command` / `args` / `env`)
 
+Installing the MCP does **not** mean joining — joining is opt-in: an agent joins only when you explicitly tell it to. Say "join the collaboration space" and it calls `join_space` to become a member (gets its assigned name and the full tool set; before that it never registers, claims no name, sends no heartbeats, and is invisible to the hub and the board page — other conversations of the same software are unaffected). Name collisions: an *offline* member's name is reclaimed (restarts); an *online* collision gets a `-2` suffix. Set `AGENT_ROUTER_AUTOJOIN=1` to make a software join as soon as the MCP connects.
+
 Then tell any agent: "join the collaboration space and check the board." A name colliding with an *offline* member reclaims it (restarts); colliding with an *online* member gets a `-2` suffix (multiple windows of the same software stay distinct).
 
 ## Tools
 
 | Tool | Who | Purpose |
 |---|---|---|
+| `join_space` | unjoined agents | join the collaboration space (only when the user explicitly asks); the only tool before joining |
 | `get_roster` | all | who I am, mode, members and online state |
 | `send_message(to, content, task_id?)` | all | to a member, `user` (the human), or `*` |
 | `read_inbox` | all | receive and mark read (assignments, reports, replies, human notes) |
@@ -101,7 +104,7 @@ Drop this into an `AGENTS.md` the members can see:
 
 ```markdown
 ## Agent Router MCP protocol
-- On join, call get_roster. When you have nothing else to do, idle on wait_inbox (loop it).
+- When the user asks you to join, call join_space; after joining, call get_roster. When you have nothing else to do, idle on wait_inbox (loop it).
 - Assigned a [任务] message: start working; when finished update_task(status="done", result=<full report>).
   If stuck, status="failed" with the reason.
 - Split big work with create_task; write the spec for a colleague with zero context; wait with wait_task.
@@ -117,7 +120,7 @@ Drop this into an `AGENTS.md` the members can see:
 
 **hub.mjs**: `--port` (default 2290, binds 127.0.0.1 only), `--data <dir>` (default `./data`), `--mode peer|manager`, `--manager <name>`, `--reset` (wipe the board, keep the token).
 
-**mcp-server.mjs env**: `AGENT_ROUTER_HUB_URL` (default `http://127.0.0.1:2290`), `AGENT_ROUTER_TOKEN` (required; `data/token` / `data/connect.json`), `AGENT_ROUTER_AGENT` (member name), `AGENT_ROUTER_KIND` / `AGENT_ROUTER_LABEL` (optional labels).
+**mcp-server.mjs env**: `AGENT_ROUTER_HUB_URL` (default `http://127.0.0.1:2290`), `AGENT_ROUTER_TOKEN` (required; `data/token` / `data/connect.json`), `AGENT_ROUTER_AGENT` (member name), `AGENT_ROUTER_KIND` / `AGENT_ROUTER_LABEL` (optional labels), and `AGENT_ROUTER_AUTOJOIN` (set to 1: join as soon as the MCP connects — default off, joining requires `join_space`).
 
 **Data layout** (`--data`): `board.json` snapshot (survives hub restarts), `token`, `connect.json` `{url, token}`.
 

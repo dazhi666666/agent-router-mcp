@@ -12,6 +12,10 @@
 import { TERMINAL } from './board.mjs';
 
 export const TOOL_SCHEMAS = {
+  join_space: {
+    description: `Join the collaboration space (the shared task board + mailbox). Call this ONLY when the user explicitly asks to join — e.g. "加入协作空间" / "join the collaboration space" — never on your own initiative: having this MCP installed does not make you a member, and other conversations of the same software stay unjoined. Joining registers you under your configured name (a suffix is added if it's taken), switches your tool set to the full board tools, and makes you visible on the board page. If the user asked you to LEAD the team, join first, then call become_manager.`,
+    inputSchema: { type: 'object', properties: {} }
+  },
   get_roster: {
     description: `List the collaboration space: who you are (me), the mode (peer: everyone is equal / manager: only the manager creates and cancels tasks), and every member with kind, label, and online state. Call this first when you join, and whenever you need to know who to ask or assign work to.`,
     inputSchema: { type: 'object', properties: {} }
@@ -105,6 +109,9 @@ export const TOOL_SCHEMAS = {
   }
 };
 
+/** 未加入前 mcp-server 本地下发的唯一工具（Hub 侧永远不下发 join_space——成员无需它） */
+export const PRE_JOIN_TOOLS = [{ name: 'join_space', ...TOOL_SCHEMAS.join_space }];
+
 /**
  * 某个成员可见的工具定义。
  * @param {string} caller  成员名
@@ -112,6 +119,7 @@ export const TOOL_SCHEMAS = {
  */
 export function toolsFor(caller, { mode = 'peer', manager = null } = {}) {
   return Object.entries(TOOL_SCHEMAS)
+    .filter(([name]) => name !== 'join_space')
     .filter(([name]) => {
       if (mode === 'manager') {
         if (name === 'claim_task') return false;

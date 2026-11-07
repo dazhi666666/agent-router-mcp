@@ -320,7 +320,8 @@ server.listen(args.port, '127.0.0.1', () => {
   console.log(`${C.dim(`空间 ${hubName} · 数据 ${dataDir} · ${hubUrl}`)}`);
   console.log(`\n把下面这段加进各 Agent 软件的 MCP 配置（每个软件改一个不同的 AGENT_ROUTER_AGENT）：\n`);
   console.log(JSON.stringify({ mcpServers: { 'agent-router': { command: 'node', args: [mcpServerPath], env: sampleEnv } } }, null, 2));
-  console.log(`\n${C.dim(`监控页: ${hubUrl} · token: ${tokenFile} · connect.json 已写好`)}`);
+  console.log(`\n${C.dim('成员是 opt-in 的：对 agent 说「加入协作空间」它才加入（AGENT_ROUTER_AUTOJOIN=1 改为装上即加入）')}`);
+  console.log(`${C.dim(`监控页: ${hubUrl} · token: ${tokenFile} · connect.json 已写好`)}`);
   if (args.claim === 'closed') console.log(C.dim('（--claim closed：成员不能经 become_manager 自任管理者，只能由启动参数/网页指定）'));
 });
 

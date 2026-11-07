@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-// Agent Router MCP — stdio MCP 服务：Agent 软件加载它即加入协作空间。
+// Agent Router MCP — stdio MCP 服务：Agent 软件加载它后，被用户要求时即可加入协作空间。
 // 轻量代理（同 Agent-Router 的板协议）：tools/list、tools/call 转发到 Hub 的 /rpc，
-// 任务板状态只存在于 Hub；启动时注册身份，之后每 15s 心跳，stdin 关闭时告别。
+// 任务板状态只存在于 Hub；加入时注册身份，之后每 15s 心跳，stdin 关闭时告别。
+//
+// 加入是 opt-in 的：装上本 MCP 并不等于加入。未加入时 tools/list 只返回 join_space 一个工具，
+// 调用 join_space（用户明确要求加入时）才注册成为成员；AGENT_ROUTER_AUTOJOIN=1 改为装上即加入。
 //
 // 环境变量（Hub 启动时会打印一份可粘贴的配置）：
 //   AGENT_ROUTER_HUB_URL  Hub 地址（默认 http://127.0.0.1:2290）
@@ -9,21 +12,24 @@
 //   AGENT_ROUTER_AGENT    本成员的名字（默认 agent；与在线成员重名自动加后缀，离线重名则复用）
 //   AGENT_ROUTER_KIND     类型标签（可选：claude / zcode / codex / …）
 //   AGENT_ROUTER_LABEL    展示名（可选）
+//   AGENT_ROUTER_AUTOJOIN 设为 1：MCP 一连上就自动加入（默认关闭：用户说了才 join_space）
 // stdout 只走 MCP 协议，日志写 stderr。
 import readline from 'node:readline';
 import http from 'node:http';
-import { TOOL_SCHEMAS } from './core/tools.mjs';
+import { TOOL_SCHEMAS, PRE_JOIN_TOOLS } from './core/tools.mjs';
 
 const HUB = (process.env.AGENT_ROUTER_HUB_URL || 'http://127.0.0.1:2290').replace(/\/$/, '');
 const TOKEN = process.env.AGENT_ROUTER_TOKEN || '';
 const BASE_NAME = process.env.AGENT_ROUTER_AGENT || 'agent';
 const KIND = process.env.AGENT_ROUTER_KIND || '';
 const LABEL = process.env.AGENT_ROUTER_LABEL || '';
-const SERVER_INFO = { name: 'agent-router-mcp', version: '0.1.0' };
+const AUTOJOIN = /^(1|true|yes)$/i.test(process.env.AGENT_ROUTER_AUTOJOIN || '');
+const SERVER_INFO = { name: 'agent-router-mcp', version: '0.2.0' };
 
 if (!TOKEN) console.error('[agent-router-mcp] AGENT_ROUTER_TOKEN 未设置：先启动 hub.mjs，用它输出/数据目录 data/token 里的令牌。');
 
 let me = null;            // Hub 分配的身份（重名时会加后缀）
+let joined = false;       // 是否已加入（= 已注册）；未加入时工具表只有 join_space
 let registering = null;
 let heartbeat = null;
 let watchStarted = false;
@@ -114,6 +120,7 @@ async function register() {
   const r = await post('/register', { name: BASE_NAME, kind: KIND, label: LABEL });
   if (r.status !== 200) throw new Error(r.json?.error || `HTTP ${r.status}`);
   me = r.json.name;
+  joined = true;
   if (!heartbeat) heartbeat = setInterval(() => { post('/heartbeat', { name: me }).catch(() => {}); }, 15_000);
   heartbeat.unref?.();
   lastIdentity = { mode: r.json.mode, manager: r.json.manager || null };
@@ -137,11 +144,31 @@ async function forward(msg) {
     const text = `agent-router hub unavailable: ${e.message}`;
     // Hub 暂不可达：tools/list 回兜底全集（权限 Hub 在 call 时还会再校验），tools/call 报错
     if (msg.method === 'tools/list')
-      return { jsonrpc: '2.0', id: msg.id, result: { tools: Object.entries(TOOL_SCHEMAS).map(([name, def]) => ({ name, ...def })) } };
+      return { jsonrpc: '2.0', id: msg.id, result: { tools: Object.entries(TOOL_SCHEMAS).filter(([name]) => name !== 'join_space').map(([name, def]) => ({ name, ...def })) } };
     if (msg.method === 'tools/call')
       return { jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify({ error: text }, null, 1) }], isError: true } };
     return { jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: text } };
   }
+}
+
+/** join_space：注册成为成员；成功后下发完整工具表变更通知。返回 null 表示响应已直接写出 */
+async function handleJoin(msg) {
+  const replyOut = result => ({ jsonrpc: '2.0', id: msg.id, result });
+  if (joined)
+    return replyOut({ content: [{ type: 'text', text: JSON.stringify({ ok: true, name: me, note: 'already joined' }, null, 1) }] });
+  try {
+    await ensureRegistered();
+  } catch (e) {
+    return replyOut({ content: [{ type: 'text', text: JSON.stringify({ error: `join failed: ${e.message}` }, null, 1) }], isError: true });
+  }
+  let extra = {};
+  try {
+    const s = await httpGetJson('/api/state');
+    extra = { mode: s.mode, manager: s.manager || null, members: s.peers.map(p => p.name) };
+  } catch {}
+  process.stdout.write(JSON.stringify(replyOut({ content: [{ type: 'text', text: JSON.stringify({ ok: true, name: me, ...extra }, null, 1) }] })) + '\n');
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }) + '\n');
+  return null;
 }
 
 async function handleMessage(msg) {
@@ -153,7 +180,23 @@ async function handleMessage(msg) {
       serverInfo: SERVER_INFO
     } };
   if (msg.method === 'ping') return { jsonrpc: '2.0', id: msg.id, result: {} };
-  if (msg.method === 'tools/list' || msg.method === 'tools/call') return forward(msg);
+  if (msg.method === 'tools/list') {
+    if (!joined && AUTOJOIN) { try { await ensureRegistered(); } catch {} }
+    if (!joined) return { jsonrpc: '2.0', id: msg.id, result: { tools: PRE_JOIN_TOOLS } };
+    return forward(msg);
+  }
+  if (msg.method === 'tools/call') {
+    if (msg.params?.name === 'join_space') return handleJoin(msg);
+    if (!joined) {
+      if (AUTOJOIN) { try { await ensureRegistered(); } catch {} }
+      if (!joined)
+        return { jsonrpc: '2.0', id: msg.id, result: {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'not a member of the collaboration space yet — call join_space first (the user must explicitly ask to join)' }, null, 1) }],
+          isError: true
+        } };
+    }
+    return forward(msg);
+  }
   if (msg.id === undefined) return null; // notifications/initialized 等
   return { jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: `method not found: ${msg.method}` } };
 }

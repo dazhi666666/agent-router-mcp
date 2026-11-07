@@ -123,7 +123,7 @@ function render() {
       <div class="meta">${esc([p.kind, p.label].filter(Boolean).join(' · ') || '')}${p.online ? '在线' : '离线'}</div>
       ${isMgr ? '<div class="meta">现任主代理</div>' : `<button class="mini" data-mgr="${esc(p.name)}" title="设为主代理（空间将切换为管理者模式）">★ 设为主代理</button>`}
     </div>`;
-  }).join('') : '<div class="empty">还没有成员加入 —— 把 hub 启动时输出的 MCP 配置加进各 Agent 软件。</div>';
+  }).join('') : '<div class="empty">还没有成员加入 —— 把 hub 启动时输出的 MCP 配置加进各 Agent 软件，然后对 agent 说「加入协作空间」。</div>';
 
   $('tasks').innerHTML = state.tasks.length ? `<table>
     <tr><th>任务</th><th>状态</th><th>负责人</th><th>依赖</th><th>创建</th><th>更新</th><th></th></tr>

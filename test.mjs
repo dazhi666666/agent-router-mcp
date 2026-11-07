@@ -13,6 +13,8 @@ import { toolsFor, callTool, wakeWaiters } from './core/tools.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const TRACE = !!process.env.ARM_TRACE;
+const trace = (...m) => { if (TRACE) console.error('[trace]', ...m); };
 const tmp = (t, clean = true) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'arm-'));
   if (clean) t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
@@ -260,8 +262,11 @@ const spawnMcp = (t, hub, name = 'claude-dev', kind = 'claude') => {
     stdio: ['pipe', 'pipe', 'pipe']
   });
   let stderr = '';
-  child.stderr.on('data', d => { stderr += d; });
-  const waiters = [];
+  child.stderr.on('data', d => { stderr += d; if (TRACE) console.error('[mcp.stderr]', String(d).trim()); });
+  // 行队列式读取：一个 data 块可能含多行（如 join 响应 + list_changed 通知同一 tick 写出），
+  // 先到的行进队列，绝不能因为还没人 await 就丢掉
+  const lines = [];
+  const pending = [];
   let buf = '';
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', d => {
@@ -270,12 +275,18 @@ const spawnMcp = (t, hub, name = 'claude-dev', kind = 'claude') => {
     while ((i = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, i);
       buf = buf.slice(i + 1);
-      const w = waiters.shift();
-      if (w) w(line);
+      const p = pending.shift();
+      if (p) p(line);
+      else lines.push(line);
     }
   });
   t.after(() => { try { child.kill(); } catch {} });
-  return { child, nextLine: () => new Promise(resolve => waiters.push(resolve)), send: obj => child.stdin.write(JSON.stringify(obj) + '\n'), stderr: () => stderr };
+  return {
+    child,
+    nextLine: () => new Promise(resolve => { if (lines.length) resolve(lines.shift()); else pending.push(resolve); }),
+    send: obj => child.stdin.write(JSON.stringify(obj) + '\n'),
+    stderr: () => stderr
+  };
 };
 
 test('hub：注册命名——新名字、在线重名加后缀、离线重名回收、token/身份校验', async t => {
@@ -395,43 +406,106 @@ test('hub：SSE 推送变更', async t => {
 });
 
 // ---------- MCP stdio 端到端 ----------
-test('MCP stdio 端到端：initialize → tools/list → tools/call → Hub 上可见；stdin 关闭即退出', async t => {
+test('MCP stdio 端到端：opt-in 加入 → 工具表变更 → 派活全链路；stdin 关闭即退出', async t => {
   const hub = await startHub(t);
   const mcp = spawnMcp(t, hub, 'claude-dev');
   const send = mcp.send, nextLine = mcp.nextLine;
 
+  trace('send initialize');
   send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
   const init = JSON.parse(await nextLine());
+  trace('init ok');
   assert.equal(init.result.serverInfo.name, 'agent-router-mcp');
   send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-  send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-  const list = JSON.parse(await nextLine());
-  const names = list.result.tools.map(x => x.name);
-  assert.ok(names.includes('create_task') && names.includes('wait_inbox') && names.includes('claim_task'));
 
-  send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'create_task', arguments: { title: '来自 MCP 的任务', spec: '验证 MCP 链路' } } });
+  // 未加入：工具表只有 join_space，Hub 上没有这个成员，调用板工具被拒
+  send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  const preList = JSON.parse(await nextLine());
+  trace('pre-list ok');
+  assert.deepEqual(preList.result.tools.map(x => x.name), ['join_space']);
+  send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_roster', arguments: {} } });
+  const denied = JSON.parse(await nextLine());
+  trace('denied ok');
+  assert.equal(denied.result.isError, true);
+  assert.match(denied.result.content[0].text, /join_space/);
+  let state = await (await fetch(new URL('/api/state', hub.url))).json();
+  trace('state1 ok');
+  assert.deepEqual(state.peers, []);
+
+  // 用户发话：join_space 加入 → 拿到身份和空间信息，工具表变更通知
+  send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'join_space', arguments: {} } });
+  const joinedRes = JSON.parse(await nextLine());
+  trace('join-resp ok');
+  assert.equal(joinedRes.result.isError, undefined);
+  const joinedVal = JSON.parse(joinedRes.result.content[0].text);
+  assert.equal(joinedVal.ok, true);
+  assert.equal(joinedVal.name, 'claude-dev');
+  assert.equal(joinedVal.mode, 'peer');
+  const joinNotify = JSON.parse(await nextLine());
+  trace('join-notify ok');
+  assert.equal(joinNotify.method, 'notifications/tools/list_changed');
+
+  send({ jsonrpc: '2.0', id: 5, method: 'tools/list' });
+  const full = JSON.parse(await nextLine());
+  trace('post-list ok');
+  const names = full.result.tools.map(x => x.name);
+  assert.ok(names.includes('create_task') && names.includes('wait_inbox') && !names.includes('join_space'));
+
+  send({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'create_task', arguments: { title: '来自 MCP 的任务', spec: '验证 MCP 链路' } } });
   const created = JSON.parse(await nextLine());
+  trace('created ok');
   assert.equal(JSON.parse(created.result.content[0].text).id, 'T1');
 
-  const state = await (await fetch(new URL('/api/state', hub.url))).json();
+  state = await (await fetch(new URL('/api/state', hub.url))).json();
+  trace('state2 ok');
   assert.ok(state.peers.some(p => p.name === 'claude-dev' && p.kind === 'claude'));
   assert.equal(state.tasks[0].created_by, 'claude-dev');
 
+  trace('stdin.end, wait exit');
   mcp.child.stdin.end();
   const closed = await Promise.race([new Promise(r => mcp.child.once('exit', r)), sleep(4000).then(() => 'timeout')]);
   assert.notEqual(closed, 'timeout', `stdin 关闭后未退出；stderr: ${mcp.stderr()}`);
   assert.match(mcp.stderr(), /joined as "claude-dev"/);
 });
 
-test('MCP：管理者/模式变更 → 宿主收到 tools/list_changed 推送（权限即时生效）', async t => {
+test('MCP：未加入不注册、不占名；两个实例按加入顺序分配名字', async t => {
+  const hub = await startHub(t);
+  const mcp = spawnMcp(t, hub, 'zcode');
+  mcp.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await mcp.nextLine();
+  mcp.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  JSON.parse(await mcp.nextLine());
+  await sleep(300);
+  let state = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.deepEqual(state.peers, []); // 没注册、没占名
+
+  // 另一个实例先加入，拿走 "zcode"
+  const mcp2 = spawnMcp(t, hub, 'zcode');
+  mcp2.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await mcp2.nextLine();
+  mcp2.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'join_space', arguments: {} } });
+  const first = JSON.parse(await mcp2.nextLine());
+  assert.equal(JSON.parse(first.result.content[0].text).name, 'zcode');
+
+  // 第一个实例现在才加入 → 排到 zcode-2
+  mcp.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'join_space', arguments: {} } });
+  const second = JSON.parse(await mcp.nextLine());
+  assert.equal(JSON.parse(second.result.content[0].text).name, 'zcode-2');
+
+  state = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.deepEqual(state.peers.map(p => p.name).sort(), ['zcode', 'zcode-2']);
+});
+
+test('MCP：加入后管理者/模式变更 → 宿主收到 tools/list_changed 推送（权限即时生效）', async t => {
   const hub = await startHub(t);
   const mcp = spawnMcp(t, hub, 'claude-dev');
 
   mcp.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
   const init = JSON.parse(await mcp.nextLine());
   assert.equal(init.result.capabilities.tools.listChanged, true);
-  mcp.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-  await mcp.nextLine(); // 触发注册，watcher 以 peer 基线启动
+  mcp.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'join_space', arguments: {} } });
+  await mcp.nextLine(); // join 响应
+  await mcp.nextLine(); // join 触发的 list_changed
   await sleep(300);
   await post(hub.url, '/api/manager', { name: 'claude-dev' });
 
