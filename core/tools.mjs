@@ -20,13 +20,13 @@ export const TOOL_SCHEMAS = {
     }
   },
   create_space: {
-    description: `Create a new named collaboration space and become its first member. A space is fully isolated: its own task board, mailbox, members and manager — tasks and messages never cross between spaces. Any member can create spaces; names are unique (Chinese is fine, up to 40 chars). mode "peer" (default) means everyone is equal; mode "manager" makes you the manager of the new space. After creating, you are switched into it.`,
+    description: `Create a new named collaboration space and become its first member. A space is fully isolated: its own task board, mailbox, members and manager — tasks and messages never cross between spaces. Any member can create spaces; names are unique (Chinese is fine, up to 40 chars). mode "peer" (default) means everyone is equal; mode "manager" only sets the space's rules — it does NOT make you its manager. Managers are always explicit: the human designates one on the board page (or with --manager at startup), or you call become_manager when the user asked you to lead. If the user asked you to create and lead the space, create it and then call become_manager.`,
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Unique space name, e.g. "火星基地" or "release-2026"' },
         label: { type: 'string', description: 'Optional human-friendly subtitle' },
-        mode: { type: 'string', enum: ['peer', 'manager'], description: 'peer (default, everyone equal) or manager (you become the manager)' }
+        mode: { type: 'string', enum: ['peer', 'manager'], description: 'peer (default, everyone equal) or manager (manager-led; manager still has to be designated explicitly)' }
       },
       required: ['name']
     }
@@ -180,7 +180,10 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
     if (!args.name || !String(args.name).trim()) return { error: 'name is required' };
     const r = registry.createSpace({ name: args.name, label: args.label ?? '', mode: args.mode || 'peer' }, caller, ctx.callerInstance || null);
     if (r.error) return r;
-    return { ok: true, created: true, ...registry.spaceInfo(r.space, caller) };
+    const created = { ok: true, created: true, ...registry.spaceInfo(r.space, caller) };
+    if (r.space.board.mode === 'manager' && !r.space.board.manager)
+      created.note = 'manager mode: this space has no manager yet. Managers are never assigned automatically — the human can designate one on the board page, or you can call become_manager if (and only if) the user asked you to lead this space.';
+    return created;
   }
 
   const mode = ctx.mode || board.mode;

@@ -76,7 +76,7 @@ Then tell any agent: "join the collaboration space and check the board." A name 
 One Hub can host many **named spaces**. Each space is its own task board + mailbox + member list + mode + manager; tasks, messages and membership never cross between spaces.
 
 - `list_spaces` lists every space (name, mode, manager, member/task counts, whether you joined). It works **without registering**.
-- `create_space(name, label?, mode?)` creates and names a space (Chinese is fine; whitespace collapses to `-`, max 40 chars) and makes the creator its first member. With `mode: "manager"` the creator becomes that space's manager.
+- `create_space(name, label?, mode?)` creates and names a space (Chinese is fine; whitespace collapses to `-`, max 40 chars) and makes the creator its first member. `mode: "manager"` only sets the space's rules — it does **not** make the creator its manager; the human can designate one on the page, or the creator can call `become_manager` when (and only when) the user asked it to lead.
 - `join_space(space?)` joins or switches to a space; omit `space` for the default space (the one migrated from a legacy `board.json`).
 - The current space is remembered (persisted with the identity), and every board tool applies to it. The web page has a space picker and a "＋ New space" button.
 - Identity is global, membership is per space: one agent can belong to several spaces with the same name and secret.
@@ -106,7 +106,7 @@ Statuses: `pending → in_progress → done / failed / cancelled`; a task is cla
 
 - **peer (default)**: everything above, everyone equal.
 - **manager**: only the manager can `create_task` / `cancel_task`, tasks must be assigned (`claim_task` hidden) — for "one brain, many doers" setups. Mode and manager are **per space**: switching one space to manager does not affect the others.
-- The manager is `--manager <name>` (default space only), or the **first member to join** that space; `create_space(mode: "manager")` makes the creator its manager. The role belongs to the **live session instance**: when that process restarts, is recycled by the host, or is replaced by another conversation, the manager is cleared (never inherited, never auto-filled) and must be designated again.
+- The manager is always **explicitly designated**: `--manager <name>` (default space only), the human on the page, or a member calling `become_manager` when the user asked it to lead. Being the first to join, creating a space, or switching a space to manager mode **never** grants the role automatically. The role belongs to the **live session instance**: when that process restarts, is recycled by the host, or is replaced by another conversation, the manager is cleared (never inherited, never auto-filled) and must be designated again.
 
 ### Designating / changing the manager (three ways)
 

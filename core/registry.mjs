@@ -156,8 +156,8 @@ export class Registry {
     const space = { ...meta, board };
     const ident = this.identity(by);
     board.mode = mode;
-    // 人类从网页建的空间没有对应的成员身份：不设管理者，等第一个 agent 加入时按“第一个成员”规则处理
-    if (mode === 'manager' && ident) { board.manager = by; board.managerInstance = instance; board.managerPending = false; }
+    // 注意：创建者不会自动成为管理者。manager 模式只是设定该空间的规则，
+    // 管理者必须由人类（--manager / 网页）或成员在用户明确要求下 become_manager 显式指定。
     board.save();
     if (ident) board.registerPeer({ name: by, kind: ident.kind || '', label: ident.label || '' });
     this.spaceList.push(meta);

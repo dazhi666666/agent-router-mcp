@@ -65,7 +65,7 @@ function usage() {
   --port <n>       监听端口（默认 2290，只绑定 127.0.0.1；0 = 随机端口，测试用）
   --data <dir>     数据目录（默认 ./data；hub.json + 各空间的板文件 + token）
   --mode <m>       peer（默认，平等互联）| manager（管理者模式），作用于所有空间
-  --manager <name> manager 模式下指定默认空间的管理者名字（缺省：该空间第一个加入的成员）
+  --manager <name> manager 模式下指定默认空间的管理者名字（不指定就没有管理者，需在网页/对话中显式指定）
   --claim <o|c>    open（默认：成员可经 become_manager 自任管理者）| closed（只许启动参数/网页指定）
   --space <name>   默认空间名（默认 main；旧版 board.json 会成为这个空间）
   --max-spaces <n> 最多允许创建多少个空间（默认 ${MAX_SPACES}）
@@ -222,13 +222,10 @@ function canResume(name) {
   const seen = online.get(name) || 0;
   return !isOnline(name) || (Date.now() - seen > 20_000);
 }
-/** 加入空间时的管理者生命周期：同一名字换了进程实例 → 管理者作废；--manager 指定 → 授予 */
+/** 加入空间时的管理者生命周期：绝不自动产生管理者；--manager 指定的名字在加入时授予；换实例则作废 */
 function settleManagerOnJoin(space, name, instance) {
   const board = space.board;
-  if (board.manager !== name) {
-    if (board.mode === 'manager' && !board.manager && board.peers.length === 1) board.setManager(name, instance);
-    return;
-  }
+  if (board.manager !== name) return;
   if (board.managerPending) { board.setManager(name, instance, false); return; }
   if (board.managerInstance !== instance) {
     console.log(`${C.yellow('!')} 空间 "${space.name}" 的管理者 ${name} 的会话已更换，管理者已清空`);

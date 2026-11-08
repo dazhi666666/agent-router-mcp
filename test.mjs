@@ -396,15 +396,21 @@ test('hub：开放任务广播、依赖就绪通知、页面取消', async t => 
   assert.equal(state.tasks.find(x => x.id === 'T2').status, 'cancelled');
 });
 
-test('hub：manager 模式——第一个加入者成为管理者，工具按身份过滤', async t => {
+test('hub：manager 模式——第一个加入不自动成为管理者，需显式指定', async t => {
   const hub = await startHub(t, ['--mode', 'manager']);
-  assert.equal((await reg(hub, 'zcode-main')).join.manager, 'zcode-main');
-  assert.equal((await reg(hub, 'codex-helper')).join.manager, 'zcode-main');
+  const first = await reg(hub, 'zcode-main');
+  assert.equal(first.join.manager, null); // 第一个加入不会自动成为管理者
+  const second = await reg(hub, 'codex-helper');
+  assert.equal(second.join.manager, null);
 
   const names = (await rpc(hub, 'codex-helper', 'tools/list')).tools.map(x => x.name);
   assert.ok(!names.includes('create_task') && !names.includes('claim_task'));
   const errRes = await post(hub.url, '/rpc', { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'create_task', arguments: { title: 'x', assignee: 'codex-helper' } } }, { ...auth(hub), 'X-Agent': 'codex-helper', 'X-Agent-Secret': hub.secrets.get('codex-helper') });
-  assert.match(JSON.parse(errRes.json.result.content[0].text).error, /only the manager/);
+  assert.match(JSON.parse(errRes.json.result.content[0].text).error, /no manager has joined yet/);
+
+  // 用户明确要求后才由成员自己接管；不做任何自动指定
+  const became = await call(hub, 'zcode-main', 'become_manager');
+  assert.equal(became.manager, 'zcode-main');
   await call(hub, 'zcode-main', 'create_task', { title: '总控任务', assignee: 'codex-helper' });
 });
 
@@ -574,7 +580,9 @@ test('hub：per-peer secret —— 共享 token 也不能冒充别人（尤其 m
 test('hub：resume 恢复原名；管理者随会话换代清空，不自动补位', async t => {
   const hub = await startHub(t, ['--mode', 'manager']);
   const first = await reg(hub, 'lead');
-  assert.equal(first.join.manager, 'lead');
+  assert.equal(first.join.manager, null); // 不会自动产生管理者
+  const became = await call(hub, 'lead', 'become_manager'); // 显式接管
+  assert.equal(became.manager, 'lead');
   assert.equal(first.json.resumed, false);
   const leadSecret = hub.secrets.get('lead');
 
@@ -714,7 +722,10 @@ test('spaces：成员资格按空间隔离；manager 只属于创建它的空间
 
   const ops = await call(hub, 'alice', 'create_space', { name: 'ops', mode: 'manager' });
   assert.equal(ops.mode, 'manager');
-  assert.equal(ops.manager, 'alice');
+  assert.equal(ops.manager, null); // 创建者不会自动成为管理者
+  assert.match(ops.note, /no manager yet/);
+  const became = await call(hub, 'alice', 'become_manager');
+  assert.equal(became.manager, 'alice');
 
   // bob 不是 ops 成员：工具表退回 3 个空间工具，板工具被拒
   const names0 = (await rpc(hub, 'bob', 'tools/list', {}, 'ops')).tools.map(x => x.name);
