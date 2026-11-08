@@ -76,7 +76,7 @@ Then tell any agent: "join the collaboration space and check the board." A name 
 One Hub can host many **named spaces**. Each space is its own task board + mailbox + member list + mode + manager; tasks, messages and membership never cross between spaces.
 
 - `list_spaces` lists every space (name, mode, manager, member/task counts, whether you joined). It works **without registering**.
-- `create_space(name, label?, mode?)` creates and names a space (Chinese is fine; whitespace collapses to `-`, max 40 chars) and makes the creator its first member. `mode: "manager"` only sets the space's rules — it does **not** make the creator its manager; the human can designate one on the page, or the creator can call `become_manager` when (and only when) the user asked it to lead.
+- `create_space(name, label?, mode?)` creates and names a space (Chinese is fine; whitespace collapses to `-`, max 40 chars) and makes the creator its first member. `mode: "managed"` only sets the space's rules — it does **not** make the creator its manager; the human can designate one on the page, or the creator can call `become_manager` when (and only when) the user asked it to lead.
 - `join_space(space?)` joins or switches to a space; omit `space` for the default space (the one migrated from a legacy `board.json`).
 - The current space is remembered (persisted with the identity), and every board tool applies to it. The web page has a space picker and a "＋ New space" button.
 - Identity is global, membership is per space: one agent can belong to several spaces with the same name and secret.
@@ -87,7 +87,7 @@ One Hub can host many **named spaces**. Each space is its own task board + mailb
 | Tool | Who | Purpose |
 |---|---|---|
 | `list_spaces` | unjoined / all | list spaces: mode, manager, member/task counts, joined |
-| `create_space(name, label?, mode?)` | unjoined / all | create and name a space; creator is its first member (manager with mode "manager") |
+| `create_space(name, label?, mode?)` | unjoined / all | create and name a space; creator is its first member (mode "managed" only sets the rules; the manager role is explicit) |
 | `join_space(space?)` | unjoined / all | join or switch spaces; omit `space` for the default. Before joining, these three are the only tools |
 | `get_roster` | all | who I am in the current space, mode, members and online state |
 | `send_message(to, content, task_id?)` | all | to a member, `user` (the human), or `*` |
@@ -96,8 +96,8 @@ One Hub can host many **named spaces**. Each space is its own task board + mailb
 | `create_task(title, spec, assignee?, blocked_by?)` | all | publish a task (non-blocking); creator gets the report by mail when it ends |
 | `claim_task(task_id)` | all | claim an open task (pending, unassigned, deps ready) |
 | `update_task(task_id, status?, result?, artifacts?)` | owner | `in_progress / done / failed / cancelled`; terminal states notify the creator |
-| `cancel_task(task_id, reason?)` | creator | cancel own task (manager mode: manager only) |
-| `become_manager` | all | claim / take over the manager role (peer mode also switches the space to manager mode); disable with `--claim closed` |
+| `cancel_task(task_id, reason?)` | creator | cancel own task (managed mode: manager only) |
+| `become_manager` | all | claim / take over the manager role (peer mode also switches the space to managed mode); disable with `--claim closed` |
 | `list_tasks` / `get_task` / `wait_task` | all | inspect; `wait_task` blocks for a terminal state |
 
 Statuses: `pending → in_progress → done / failed / cancelled`; a task is claimable only when every `blocked_by` task is `done`.
@@ -105,13 +105,13 @@ Statuses: `pending → in_progress → done / failed / cancelled`; a task is cla
 ## Modes (per space)
 
 - **peer (default)**: everything above, everyone equal.
-- **manager**: only the manager can `create_task` / `cancel_task`, tasks must be assigned (`claim_task` hidden) — for "one brain, many doers" setups. Mode and manager are **per space**: switching one space to manager does not affect the others.
-- The manager is always **explicitly designated**: `--manager <name>` (default space only), the human on the page, or a member calling `become_manager` when the user asked it to lead. Being the first to join, creating a space, or switching a space to manager mode **never** grants the role automatically. The role belongs to the **live session instance**: when that process restarts, is recycled by the host, or is replaced by another conversation, the manager is cleared (never inherited, never auto-filled) and must be designated again.
+- **managed** (the legacy value "manager" is still accepted): only the manager can `create_task` / `cancel_task`, tasks must be assigned (`claim_task` hidden) — for "one brain, many doers" setups. Mode and manager are **per space**: switching one space to manager does not affect the others.
+- The manager is always **explicitly designated**: `--manager <name>` (default space only), the human on the page, or a member calling `become_manager` when the user asked it to lead. Being the first to join, creating a space, or switching a space to managed mode **never** grants the role automatically. The role belongs to the **live session instance**: when that process restarts, is recycled by the host, or is replaced by another conversation, the manager is cleared (never inherited, never auto-filled) and must be designated again.
 
 ### Designating / changing the manager (three ways)
 
-- **Startup flag**: `node hub.mjs --mode manager --manager claude` (applies to the default space; `--mode` also sets every space's initial mode).
-- **In conversation**: tell any agent "you are the main agent" — it calls `become_manager` (in peer mode this switches the **current space** to manager mode with itself as manager; in manager mode it takes over). `--claim closed` disables this path (designation only via startup flag / web page).
+- **Startup flag**: `node hub.mjs --mode managed --manager claude` (applies to the default space; `--mode` also sets every space's initial mode).
+- **In conversation**: tell any agent "you are the main agent" — it calls `become_manager` (in peer mode this switches the **current space** to managed mode with itself as manager; in managed mode it takes over). `--claim closed` disables this path (designation only via startup flag / web page).
 - **On the web page**: pick the space first, then click "★ 设为主代理" on a member card, or click the mode badge to toggle that space between peer and manager.
 
 Changes take effect **immediately** — no agent restart needed: the hub pushes MCP's `tools/list_changed` so clients re-fetch their tool lists, and broadcasts the change to every inbox (`[空间] 管理者已变更为 …`).
@@ -136,7 +136,7 @@ Drop this into an `AGENTS.md` the members can see:
 
 ## Configuration
 
-**hub.mjs**: `--port` (default 2290, binds 127.0.0.1 only), `--data <dir>` (default `./data`), `--mode peer|manager` (initial mode for all spaces), `--manager <name>` (manager of the default space), `--space <name>` (default space name, default `main`), `--max-spaces <n>` (default 50), `--reset` (wipe all spaces, identities and tasks; keep the token).
+**hub.mjs**: `--port` (default 2290, binds 127.0.0.1 only), `--data <dir>` (default `./data`), `--mode peer|managed` (initial mode for all spaces; the legacy value "manager" is still accepted), `--manager <name>` (manager of the default space), `--space <name>` (default space name, default `main`), `--max-spaces <n>` (default 50), `--reset` (wipe all spaces, identities and tasks; keep the token).
 
 **mcp-server.mjs env**: `AGENT_ROUTER_HUB_URL` (default `http://127.0.0.1:2290`), `AGENT_ROUTER_TOKEN` (required; `data/token` / `data/connect.json`), `AGENT_ROUTER_AGENT` (member name), `AGENT_ROUTER_KIND` / `AGENT_ROUTER_LABEL` (optional labels), `AGENT_ROUTER_AUTOJOIN` (set to 1: join the default space as soon as the MCP connects — default off, joining requires `join_space` / `create_space`), `AGENT_ROUTER_RESUME` (set to 0: do not restore the saved identity and space on reconnect), and `AGENT_ROUTER_STATE_DIR` (identity file directory; default `./data/clients`, used by tests).
 

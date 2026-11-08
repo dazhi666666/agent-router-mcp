@@ -146,21 +146,21 @@ test('tools：become_manager——peer 自任并切模式、接任、幂等、--
 
   const r1 = callTool(board, 'alice', 'become_manager', {}, { mode: 'peer', manager: null });
   assert.equal(r1.ok, true);
-  assert.equal(r1.mode, 'manager');
-  assert.equal(board.mode, 'manager');
+  assert.equal(r1.mode, 'managed');
+  assert.equal(board.mode, 'managed');
   assert.equal(board.manager, 'alice');
 
-  const r2 = callTool(board, 'bob', 'become_manager', {}, { mode: 'manager', manager: 'alice' });
+  const r2 = callTool(board, 'bob', 'become_manager', {}, { mode: 'managed', manager: 'alice' });
   assert.equal(r2.manager, 'bob');
   assert.equal(board.manager, 'bob');
 
-  const r3 = callTool(board, 'bob', 'become_manager', {}, { mode: 'manager', manager: 'bob' });
+  const r3 = callTool(board, 'bob', 'become_manager', {}, { mode: 'managed', manager: 'bob' });
   assert.match(r3.note, /already/);
 
   const r4 = callTool(board, 'alice', 'become_manager', {}, { mode: 'peer', manager: null, claimClosed: true });
   assert.match(r4.error, /--claim closed/);
 
-  assert.ok(toolsFor('alice', { mode: 'manager', manager: 'bob' }).some(x => x.name === 'become_manager'));
+  assert.ok(toolsFor('alice', { mode: 'managed', manager: 'bob' }).some(x => x.name === 'become_manager'));
 });
 
 test('hub：网页指定主代理 / 切换模式 / become_manager 接任，广播与工具表即时过滤', async t => {
@@ -171,7 +171,7 @@ test('hub：网页指定主代理 / 切换模式 / become_manager 接任，广�
   // 网页一键：设 alice 为主代理（同时切管理者模式）
   assert.equal((await post(hub.url, '/api/manager', { name: 'alice' })).status, 200);
   let state = await (await fetch(new URL('/api/state', hub.url))).json();
-  assert.equal(state.mode, 'manager');
+  assert.equal(state.mode, 'managed');
   assert.equal(state.manager, 'alice');
   let names = (await rpc(hub, 'bob', 'tools/list')).tools.map(x => x.name);
   assert.ok(!names.includes('create_task') && names.includes('become_manager'));
@@ -206,7 +206,7 @@ test('tools：manager 模式——create/cancel 仅管理者，任务必须指�
   const board = new Board(path.join(tmp(t), 'b.json'));
   board.registerPeer({ name: 'alice' });
   board.registerPeer({ name: 'bob' });
-  const ctx = { mode: 'manager', manager: 'alice' };
+  const ctx = { mode: 'managed', manager: 'alice' };
 
   const bobTools = toolsFor('bob', ctx).map(x => x.name);
   assert.ok(!bobTools.includes('create_task') && !bobTools.includes('cancel_task') && !bobTools.includes('claim_task'));
@@ -397,7 +397,7 @@ test('hub：开放任务广播、依赖就绪通知、页面取消', async t => 
 });
 
 test('hub：manager 模式——第一个加入不自动成为管理者，需显式指定', async t => {
-  const hub = await startHub(t, ['--mode', 'manager']);
+  const hub = await startHub(t, ['--mode', 'managed']);
   const first = await reg(hub, 'zcode-main');
   assert.equal(first.join.manager, null); // 第一个加入不会自动成为管理者
   const second = await reg(hub, 'codex-helper');
@@ -406,7 +406,7 @@ test('hub：manager 模式——第一个加入不自动成为管理者，需显
   const names = (await rpc(hub, 'codex-helper', 'tools/list')).tools.map(x => x.name);
   assert.ok(!names.includes('create_task') && !names.includes('claim_task'));
   const errRes = await post(hub.url, '/rpc', { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'create_task', arguments: { title: 'x', assignee: 'codex-helper' } } }, { ...auth(hub), 'X-Agent': 'codex-helper', 'X-Agent-Secret': hub.secrets.get('codex-helper') });
-  assert.match(JSON.parse(errRes.json.result.content[0].text).error, /no manager has joined yet/);
+  assert.match(JSON.parse(errRes.json.result.content[0].text).error, /no manager has been designated yet/);
 
   // 用户明确要求后才由成员自己接管；不做任何自动指定
   const became = await call(hub, 'zcode-main', 'become_manager');
@@ -546,7 +546,7 @@ test('MCP：加入后管理者/模式变更 → 宿主收到 tools/list_changed 
   }
   assert.ok(seen, '未收到 tools/list_changed 推送');
   const state = await (await fetch(new URL('/api/state', hub.url))).json();
-  assert.equal(state.mode, 'manager');
+  assert.equal(state.mode, 'managed');
   assert.equal(state.manager, 'claude-dev');
 });
 
@@ -578,7 +578,7 @@ test('hub：per-peer secret —— 共享 token 也不能冒充别人（尤其 m
 });
 
 test('hub：resume 恢复原名；管理者随会话换代清空，不自动补位', async t => {
-  const hub = await startHub(t, ['--mode', 'manager']);
+  const hub = await startHub(t, ['--mode', 'managed']);
   const first = await reg(hub, 'lead');
   assert.equal(first.join.manager, null); // 不会自动产生管理者
   const became = await call(hub, 'lead', 'become_manager'); // 显式接管
@@ -603,7 +603,7 @@ test('hub：resume 恢复原名；管理者随会话换代清空，不自动补�
   const other = await reg(hub, 'worker');
   assert.equal(other.join.manager, null);
   const st = await (await fetch(new URL('/api/state', hub.url))).json();
-  assert.equal(st.mode, 'manager');
+  assert.equal(st.mode, 'managed');
   assert.equal(st.manager, null);
 });
 
@@ -720,8 +720,8 @@ test('spaces：成员资格按空间隔离；manager 只属于创建它的空间
   await reg(hub, 'alice');
   await reg(hub, 'bob'); // 两人都在 main
 
-  const ops = await call(hub, 'alice', 'create_space', { name: 'ops', mode: 'manager' });
-  assert.equal(ops.mode, 'manager');
+  const ops = await call(hub, 'alice', 'create_space', { name: 'ops', mode: 'managed' });
+  assert.equal(ops.mode, 'managed');
   assert.equal(ops.manager, null); // 创建者不会自动成为管理者
   assert.match(ops.note, /no manager yet/);
   const became = await call(hub, 'alice', 'become_manager');
@@ -810,4 +810,17 @@ test('MCP：list_spaces 不注册；create_space 自动切换；两个空间互�
   b.send({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'list_tasks', arguments: {} } });
   const bobTasks = JSON.parse(JSON.parse(await b.nextLine()).result.content[0].text);
   assert.deepEqual(bobTasks.map(x => x.id), ['T1']);
+});
+
+test('modes：manager 作为旧别名仍被接受，内部统一为 managed', async t => {
+  const hub = await startHub(t, ['--mode', 'manager']); // 旧别名
+  await reg(hub, 'legacy');
+  const st = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.equal(st.mode, 'managed');
+  const r = await post(hub.url, '/api/mode', { mode: 'manager' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.mode, 'managed');
+  assert.equal((await post(hub.url, '/api/mode', { mode: 'chaos' })).status, 400);
+  const sp = await call(hub, 'legacy', 'create_space', { name: 'legacy-space', mode: 'manager' });
+  assert.equal(sp.mode, 'managed');
 });

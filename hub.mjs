@@ -20,13 +20,14 @@
 //                          管理者属于“当前在线的那个会话实例”，进程换代后清空，需重新指定
 //
 // 用法:
-//   node hub.mjs [--port 2290] [--data <dir>] [--mode peer|manager] [--manager <name>] [--space <default>] [--reset]
+//   node hub.mjs [--port 2290] [--data <dir>] [--mode peer|managed] [--manager <name>] [--space <default>] [--reset]
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Registry, sanitizeSpaceName } from './core/registry.mjs';
+import { normalizeMode } from './core/board.mjs';
 import { toolsFor, callTool, wakeWaiters, SPACE_AGNOSTIC_TOOLS } from './core/tools.mjs';
 
 const PROJECT_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -51,7 +52,7 @@ function parseArgs(argv) {
     else if (a === '--help' || a === '-h') { usage(); process.exit(0); }
     else { console.error(`未知参数: ${a}`); usage(); process.exit(2); }
   }
-  if (!['peer', 'manager'].includes(args.mode || 'peer')) { console.error(`--mode 只能是 peer 或 manager`); process.exit(2); }
+  if (args.mode) { args.mode = normalizeMode(args.mode); if (!args.mode) { console.error(`--mode 只能是 peer 或 managed（manager 是旧别名）`); process.exit(2); } }
   if (!['open', 'closed'].includes(args.claim)) { console.error(`--claim 只能是 open 或 closed`); process.exit(2); }
   if (!sanitizeSpaceName(args.space)) { console.error(`--space 需要非空名字（可中文，不能含路径字符）`); process.exit(2); }
   return args;
@@ -59,12 +60,12 @@ function parseArgs(argv) {
 function usage() {
   console.log(`Agent Router MCP — 多空间协作 Hub
 
-  node hub.mjs [--port 2290] [--data <dir>] [--mode peer|manager] [--manager <name>]
+  node hub.mjs [--port 2290] [--data <dir>] [--mode peer|managed] [--manager <name>]
                [--space <default>] [--max-spaces <n>] [--reset]
 
   --port <n>       监听端口（默认 2290，只绑定 127.0.0.1；0 = 随机端口，测试用）
   --data <dir>     数据目录（默认 ./data；hub.json + 各空间的板文件 + token）
-  --mode <m>       peer（默认，平等互联）| manager（管理者模式），作用于所有空间
+  --mode <m>       peer（默认，平等互联）| managed（有管理者），作用于所有空间
   --manager <name> manager 模式下指定默认空间的管理者名字（不指定就没有管理者，需在网页/对话中显式指定）
   --claim <o|c>    open（默认：成员可经 become_manager 自任管理者）| closed（只许启动参数/网页指定）
   --space <name>   默认空间名（默认 main；旧版 board.json 会成为这个空间）
@@ -166,7 +167,7 @@ function wireSpace(space) {
   });
   board.on('mode', mode => {
     if (!board.peers.length) return;
-    board.sendMessage({ from: 'hub', to: '*', content: mode === 'manager'
+    board.sendMessage({ from: 'hub', to: '*', content: mode === 'managed'
       ? `[空间 ${space.name}] 已切换为管理者模式${board.manager ? `（管理者：${board.manager}）` : '（尚未指定管理者）'}。`
       : `[空间 ${space.name}] 已切回平等互联模式（人人可派活/认领）。` });
   });
@@ -182,7 +183,7 @@ const registry = new Registry(dataDir, {
 if (args.mode) { for (const s of registry.boards.values()) if (s.board.mode !== args.mode) { s.board.mode = args.mode; s.board.save(); } }
 if (args.manager) {
   const def = registry.space(registry.defaultSpace);
-  if (def) { def.board.mode = 'manager'; def.board.manager = args.manager; def.board.managerInstance = null; def.board.managerPending = true; def.board.save(); }
+  if (def) { def.board.mode = 'managed'; def.board.manager = args.manager; def.board.managerInstance = null; def.board.managerPending = true; def.board.save(); }
 }
 
 // 旧版的 manager 只是一个名字、没有会话凭据：升级后无法认证，直接清空（每个空间都查一遍）
@@ -394,7 +395,7 @@ const server = http.createServer(async (req, res) => {
         const ident = registry.identity(b.name);
         if (!ident) return reply(400, { error: `unknown peer "${b.name}"` });
         if (!isOnline(ident.name)) return reply(400, { error: `peer "${b.name}" is offline — let that session (re)join first, then designate it` });
-        if (board.mode !== 'manager') board.setMode('manager');
+        if (board.mode !== 'managed') board.setMode('managed');
         if (board.manager !== b.name || board.managerInstance !== ident.instance) board.setManager(b.name, ident.instance || null);
         console.log(`${C.cyan('◆ 用户')} [${space.name}] 设 ${b.name} 为主代理`);
       } else if (board.manager) {
@@ -407,8 +408,9 @@ const server = http.createServer(async (req, res) => {
       const b = await body();
       const space = pickSpace(b);
       if (!space) return reply(404, { error: `unknown space "${b.space || registry.defaultSpace}"` });
-      if (!['peer', 'manager'].includes(b.mode)) return reply(400, { error: 'mode must be peer or manager' });
-      if (space.board.mode !== b.mode) space.board.setMode(b.mode);
+      const nextMode = normalizeMode(b.mode);
+      if (!nextMode) return reply(400, { error: 'mode must be peer or managed (manager is the legacy alias)' });
+      if (space.board.mode !== nextMode) space.board.setMode(nextMode);
       console.log(`${C.cyan('◆ 用户')} [${space.name}] 切换模式 → ${b.mode}`);
       return reply(200, { ok: true, space: space.name, mode: space.board.mode, manager: space.board.manager });
     }
@@ -502,7 +504,7 @@ server.listen(args.port, '127.0.0.1', () => {
   const mcpServerPath = path.join(PROJECT_ROOT, 'mcp-server.mjs');
   const sampleEnv = { AGENT_ROUTER_HUB_URL: hubUrl, AGENT_ROUTER_TOKEN: token, AGENT_ROUTER_AGENT: '<每个 agent 软件起一个名字，如 claude / zcode>', AGENT_ROUTER_KIND: '<可选，类型标签>' };
   const spaces = registry.listSpaces(null).map(s => s.name);
-  console.log(`${C.b(`Agent Router MCP Hub（多空间 · ${registry.space(registry.defaultSpace).board.mode === 'manager' ? '管理者模式' : '平等互联模式'}）`)}`);
+  console.log(`${C.b(`Agent Router MCP Hub（多空间 · ${registry.space(registry.defaultSpace).board.mode === 'managed' ? '管理者模式' : '平等互联模式'}）`)}`);
   console.log(`${C.dim(`空间 ${hubName} · 默认空间 "${registry.defaultSpace}" · ${spaces.length} 个空间 [${spaces.join(', ')}] · 数据 ${dataDir} · ${hubUrl}`)}`);
   console.log(`\n把下面这段加进各 Agent 软件的 MCP 配置（每个软件改一个不同的 AGENT_ROUTER_AGENT）：\n`);
   console.log(JSON.stringify({ mcpServers: { 'agent-router': { command: 'node', args: [mcpServerPath], env: sampleEnv } } }, null, 2));

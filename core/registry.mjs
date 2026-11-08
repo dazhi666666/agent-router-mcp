@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { Board } from './board.mjs';
+import { Board, normalizeMode } from './board.mjs';
 
 const now = () => new Date().toISOString();
 const hashName = name => crypto.createHash('sha256').update(String(name)).digest('hex').slice(0, 12);
@@ -147,7 +147,8 @@ export class Registry {
     if (!clean) return { error: 'space name is required (letters/numbers/Chinese, up to 40 chars; no path characters)' };
     if (this.space(clean)) return { error: `space "${clean}" already exists` };
     if (this.spaceList.length >= this.maxSpaces) return { error: `space limit reached (${this.maxSpaces})` };
-    if (mode !== 'peer' && mode !== 'manager') return { error: 'mode must be peer or manager' };
+    const normalizedMode = normalizeMode(mode);
+    if (!normalizedMode) return { error: 'mode must be peer or managed' };
 
     const file = path.join(this.dataDir, 'spaces', `${hashName(clean)}.json`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -155,7 +156,7 @@ export class Registry {
     const meta = { name: clean, label: String(label || '').slice(0, 80), created_by: by, created_at: now(), file };
     const space = { ...meta, board };
     const ident = this.identity(by);
-    board.mode = mode;
+    board.mode = normalizedMode;
     // 注意：创建者不会自动成为管理者。manager 模式只是设定该空间的规则，
     // 管理者必须由人类（--manager / 网页）或成员在用户明确要求下 become_manager 显式指定。
     board.save();

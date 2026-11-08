@@ -10,6 +10,15 @@ const now = () => new Date().toISOString();
 export const TERMINAL = new Set(['done', 'failed', 'cancelled']);
 const MAX_MESSAGES = 2000;   // 消息只保留最近这么多条，防止 board.json 无限增长
 
+/** 空间模式：peer（人人平权）/ managed（有管理者）。manager 是旧值的兼容别名 */
+export const MODES = ['peer', 'managed'];
+export function normalizeMode(mode) {
+  const m = String(mode ?? '').trim().toLowerCase();
+  if (m === 'managed' || m === 'manager') return 'managed';
+  if (m === 'peer' || m === '') return 'peer';
+  return null;
+}
+
 export class Board extends EventEmitter {
   /** @param {string} file board.json 路径；已存在则载入（Hub 重启续接） */
   constructor(file) {
@@ -21,7 +30,7 @@ export class Board extends EventEmitter {
     this.tasks = data?.tasks || [];
     this.messages = data?.messages || [];
     this.peers = data?.peers || [];        // { name, kind, label, joined_at }；在线状态由 Hub 内存持有，不持久化
-    this.mode = data?.mode || 'peer';      // peer（平等互联）| manager（管理者模式）
+    this.mode = normalizeMode(data?.mode) || 'peer'; // peer（平等互联）| managed（有管理者）
     this.manager = data?.manager || null;  // manager 模式下唯一能 create_task / cancel_task 的成员
     // 管理者绑定到“当前在线的那个会话”：manager_instance 是成为管理者时的进程实例 id。
     // 同一名字重新注册（进程重启、空闲回收、换会话）时实例变化，管理者会被清空，必须由人/成员重新指定。
@@ -102,9 +111,10 @@ export class Board extends EventEmitter {
   }
 
   setMode(mode) {
-    this.mode = mode;
+    const m = normalizeMode(mode) || mode;
+    this.mode = m;
     this.save();
-    this.emit('mode', mode);
+    this.emit('mode', m);
   }
 
   /** 注册/更新成员：secretHash + instance 是本次进程的凭据；recycled=true 表示复用了离线成员的旧名字 */

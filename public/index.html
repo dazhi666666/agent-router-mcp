@@ -135,13 +135,13 @@ async function refresh() {
 
 function render() {
   if (!state) return;
-  $('mode').textContent = state.mode === 'manager' ? '管理者模式' : '平等互联模式';
-  $('manager').hidden = !(state.mode === 'manager' && state.manager);
+  $('mode').textContent = state.mode === 'managed' ? '管理者模式' : '平等互联模式';
+  $('manager').hidden = !(state.mode === 'managed' && state.manager);
   $('manager').textContent = `manager: ${state.manager}`;
   $('huburl').textContent = location.origin;
 
   $('peers').innerHTML = state.peers.length ? state.peers.map(p => {
-    const isMgr = state.mode === 'manager' && p.name === state.manager;
+    const isMgr = state.mode === 'managed' && p.name === state.manager;
     return `<div class="peer" title="加入于 ${esc(p.joined_at)}">
       <div class="name"><span class="dot ${p.online ? 'on' : ''}"></span>${esc(p.name)}${isMgr ? ' ★' : ''}</div>
       <div class="meta">${esc([p.kind, p.label].filter(Boolean).join(' · ') || '')}${p.online ? '在线' : '离线'}</div>
@@ -221,8 +221,8 @@ $('send').onsubmit = async e => {
 
 $('mode').onclick = async () => {
   if (!state) return;
-  const next = state.mode === 'peer' ? 'manager' : 'peer';
-  if (!confirm(next === 'manager' ? '切换为管理者模式？（之后由主代理派活；可在成员卡片上指定）' : '切回平等互联模式？（人人可派活/认领）')) return;
+  const next = state.mode === 'peer' ? 'managed' : 'peer';
+  if (!confirm(next === 'managed' ? '切换为管理者模式？（之后由主代理派活；可在成员卡片上指定）' : '切回平等互联模式？（人人可派活/认领）')) return;
   await fetch('/api/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ space, mode: next }) });
   refresh();
 };

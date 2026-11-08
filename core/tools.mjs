@@ -4,12 +4,12 @@
 // 协作协议（没有 Router 注入提示词，工具描述就是协议本身）：
 //   peer 模式（默认，平等互联）：所有成员平权 —— 任何人都能发任务（指派给任何人/留空任领）、
 //   认领开放任务、给任何人发消息；任务的开始与结束都由成员自己用 claim_task / update_task 标记。
-//   manager 模式：create_task / cancel_task 仅管理者可用，任务必须指派，其余与 peer 相同。
+//   managed 模式：create_task / cancel_task 仅管理者可用，任务必须指派，其余与 peer 相同。
 //
 // 通知不走推送：指派/完成/取消/依赖就绪都会变成收件人信箱里的一条消息，
 // 成员用 read_inbox 读、用 wait_inbox 长轮询等（MCP 无法向宿主注入上下文，靠成员主动收）。
 
-import { TERMINAL } from './board.mjs';
+import { TERMINAL, normalizeMode } from './board.mjs';
 
 export const TOOL_SCHEMAS = {
   join_space: {
@@ -20,13 +20,13 @@ export const TOOL_SCHEMAS = {
     }
   },
   create_space: {
-    description: `Create a new named collaboration space and become its first member. A space is fully isolated: its own task board, mailbox, members and manager — tasks and messages never cross between spaces. Any member can create spaces; names are unique (Chinese is fine, up to 40 chars). mode "peer" (default) means everyone is equal; mode "manager" only sets the space's rules — it does NOT make you its manager. Managers are always explicit: the human designates one on the board page (or with --manager at startup), or you call become_manager when the user asked you to lead. If the user asked you to create and lead the space, create it and then call become_manager.`,
+    description: `Create a new named collaboration space and become its first member. A space is fully isolated: its own task board, mailbox, members and manager — tasks and messages never cross between spaces. Any member can create spaces; names are unique (Chinese is fine, up to 40 chars). mode "peer" (default) means everyone is equal; mode "managed" only sets the space's rules — it does NOT make you its manager. Managers are always explicit: the human designates one on the board page (or with --manager at startup), or you call become_manager when the user asked you to lead. If the user asked you to create and lead the space, create it and then call become_manager.`,
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Unique space name, e.g. "火星基地" or "release-2026"' },
         label: { type: 'string', description: 'Optional human-friendly subtitle' },
-        mode: { type: 'string', enum: ['peer', 'manager'], description: 'peer (default, everyone equal) or manager (manager-led; manager still has to be designated explicitly)' }
+        mode: { type: 'string', enum: ['peer', 'managed'], description: 'peer (default, everyone equal) or managed (manager-led; the manager still has to be designated explicitly). The legacy value "manager" is still accepted' }
       },
       required: ['name']
     }
@@ -63,7 +63,7 @@ export const TOOL_SCHEMAS = {
     }
   },
   create_task: {
-    description: `Publish a task on the shared board (non-blocking — it runs inside the assignee's own agent software, not yours). In peer mode everyone is equal: assign it to any member, to yourself, or omit assignee to leave it open for anyone to claim_task. The assignee receives the spec as an inbox message; you receive an inbox message with the report when the task ends. Write the spec like a brief for a capable colleague with no context: goal, relevant files, constraints, and how to verify. Launch independent tasks together so they run concurrently; use blocked_by to order dependent ones. (manager mode: only the manager can create tasks and assignee is required.)`,
+    description: `Publish a task on the shared board (non-blocking — it runs inside the assignee's own agent software, not yours). In peer mode everyone is equal: assign it to any member, to yourself, or omit assignee to leave it open for anyone to claim_task. The assignee receives the spec as an inbox message; you receive an inbox message with the report when the task ends. Write the spec like a brief for a capable colleague with no context: goal, relevant files, constraints, and how to verify. Launch independent tasks together so they run concurrently; use blocked_by to order dependent ones. (managed mode: only the manager can create tasks and assignee is required.)`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -93,7 +93,7 @@ export const TOOL_SCHEMAS = {
     }
   },
   cancel_task: {
-    description: `Cancel a pending or running task you created (manager mode: the manager only). The task is marked cancelled and its assignee is notified. Work already done stays in place.`,
+    description: `Cancel a pending or running task you created (managed mode: the manager only). The task is marked cancelled and its assignee is notified. Work already done stays in place.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -104,7 +104,7 @@ export const TOOL_SCHEMAS = {
     }
   },
   become_manager: {
-    description: `Take over as the manager of this space. In peer mode this switches the whole space to manager mode with you as manager; in manager mode it transfers manager-ship to you (or confirms you already have it). Only call this when the user explicitly asks you to lead ("you are the main agent") — never on your own initiative.`,
+    description: `Take over as the manager of this space. In peer mode this switches the whole space to managed mode with you as manager; in managed mode it transfers manager-ship to you (or confirms you already have it). Only call this when the user explicitly asks you to lead ("you are the main agent") — never on your own initiative.`,
     inputSchema: { type: 'object', properties: {} }
   },
   list_tasks: {
@@ -144,7 +144,7 @@ export function toolsFor(caller, { mode = 'peer', manager = null, inSpace = true
     .filter(([name]) => SPACE_AGNOSTIC_TOOLS.has(name) || inSpace)
     .filter(([name]) => {
       if (SPACE_AGNOSTIC_TOOLS.has(name)) return true;
-      if (mode === 'manager') {
+      if (mode === 'managed') {
         if (name === 'claim_task') return false;
         if ((name === 'create_task' || name === 'cancel_task') && caller !== manager) return false;
       }
@@ -181,19 +181,19 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
     const r = registry.createSpace({ name: args.name, label: args.label ?? '', mode: args.mode || 'peer' }, caller, ctx.callerInstance || null);
     if (r.error) return r;
     const created = { ok: true, created: true, ...registry.spaceInfo(r.space, caller) };
-    if (r.space.board.mode === 'manager' && !r.space.board.manager)
-      created.note = 'manager mode: this space has no manager yet. Managers are never assigned automatically — the human can designate one on the board page, or you can call become_manager if (and only if) the user asked you to lead this space.';
+    if (r.space.board.mode === 'managed' && !r.space.board.manager)
+      created.note = 'managed mode: this space has no manager yet. Managers are never assigned automatically — the human can designate one on the board page, or you can call become_manager if (and only if) the user asked you to lead this space.';
     return created;
   }
 
-  const mode = ctx.mode || board.mode;
+  const mode = normalizeMode(ctx.mode || board.mode) || 'peer';
   const manager = ctx.manager !== undefined ? ctx.manager : board.manager;
   const peerNames = board.peers.map(p => p.name);
   const gate = () => {
-    if (mode !== 'manager') return null;
+    if (mode !== 'managed') return null;
     if ((name === 'create_task' || name === 'cancel_task') && caller !== manager)
-      return { error: manager ? `only the manager (${manager}) can call ${name} in manager mode` : `manager mode: no manager has joined yet, so ${name} is unavailable` };
-    if (name === 'claim_task') return { error: 'claim_task is only available in peer mode; in manager mode the manager assigns every task' };
+      return { error: manager ? `only the manager (${manager}) can call ${name} in managed mode` : `managed mode: no manager has been designated yet, so ${name} is unavailable` };
+    if (name === 'claim_task') return { error: 'claim_task is only available in peer mode; in managed mode the manager assigns every task' };
     return null;
   };
   const gated = gate();
@@ -206,10 +206,10 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
       return {
         me: caller,
         mode,
-        ...(mode === 'manager' ? { manager } : {}),
+        ...(mode === 'managed' ? { manager } : {}),
         roster: board.peers.map(p => ({
           name: p.name, kind: p.kind || null, label: p.label || null,
-          role: mode === 'manager' && p.name === manager ? 'manager' : 'peer',
+          role: mode === 'managed' && p.name === manager ? 'manager' : 'peer',
           online: ctx.onlineInfo ? !!ctx.onlineInfo(p.name) : null,
           joined_at: p.joined_at
         }))
@@ -243,7 +243,7 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
     }
     case 'create_task': {
       if (!args.title) return { error: 'title is required' };
-      if (mode === 'manager' && !args.assignee) return { error: 'assignee is required in manager mode' };
+      if (mode === 'managed' && !args.assignee) return { error: 'assignee is required in managed mode' };
       if (args.assignee && !peerNames.includes(args.assignee)) return { error: `assignee "${args.assignee}" has never joined this space (members: ${peerNames.join(', ') || 'none yet'}) — publish an open task (omit assignee) or wait for them to join` };
       const missing = (args.blocked_by || []).filter(id => !board.task(id));
       if (missing.length) return { error: `unknown blocked_by task(s): ${missing.join(', ')}` };
@@ -264,7 +264,7 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
       const t = board.task(args.task_id);
       if (!t) return { error: `task ${args.task_id} not found` };
       const owner = t.assignee || null;
-      const mayUpdate = caller === owner || (!owner && caller === t.created_by) || (mode === 'manager' && caller === manager);
+      const mayUpdate = caller === owner || (!owner && caller === t.created_by) || (mode === 'managed' && caller === manager);
       if (!mayUpdate) return { error: owner ? `task ${t.id} is owned by ${owner}` : `task ${t.id} is unassigned; claim_task it first` };
       if (args.status && !['in_progress', 'done', 'failed', 'cancelled'].includes(args.status)) return { error: 'status must be in_progress, done, failed or cancelled' };
       if (TERMINAL.has(args.status) && TERMINAL.has(t.status)) return { error: `task ${t.id} is already ${t.status}` };
@@ -278,21 +278,21 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
     case 'cancel_task': {
       const t = board.task(args.task_id);
       if (!t) return { error: `task ${args.task_id} not found` };
-      if (mode !== 'manager' && caller !== t.created_by) return { error: `task ${t.id} was created by ${t.created_by}; only the creator can cancel it (to drop your own work, update_task it cancelled)` };
+      if (mode !== 'managed' && caller !== t.created_by) return { error: `task ${t.id} was created by ${t.created_by}; only the creator can cancel it (to drop your own work, update_task it cancelled)` };
       if (TERMINAL.has(t.status)) return { error: `task ${t.id} is already ${t.status}` };
       board.updateTask(t.id, { status: 'cancelled', result: `Cancelled: ${args.reason || `by ${caller}`}` }, caller);
       return { ok: true, id: t.id, status: 'cancelled' };
     }
     case 'become_manager': {
       if (ctx.claimClosed) return { error: 'manager self-claim is disabled on this hub (--claim closed); ask the human to designate the manager on the board page or via --manager' };
-      if (mode === 'manager') {
+      if (mode === 'managed') {
         if (caller === manager) return { ok: true, mode, manager: caller, note: 'you are already the manager' };
         board.setManager(caller, ctx.callerInstance || null);
         return { ok: true, mode, manager: caller, note: `you are now the manager (took over from ${manager || 'nobody'})` };
       }
-      board.setMode('manager');
+      board.setMode('managed');
       board.setManager(caller, ctx.callerInstance || null);
-      return { ok: true, mode: 'manager', manager: caller, note: 'space switched to manager mode with you as manager; other members can no longer create tasks' };
+      return { ok: true, mode: 'managed', manager: caller, note: 'space switched to managed mode with you as manager; other members can no longer create tasks' };
     }
     case 'list_tasks':
       return board.tasks.map(t => ({
