@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 
 const now = () => new Date().toISOString();
 export const TERMINAL = new Set(['done', 'failed', 'cancelled']);
+const MAX_MESSAGES = 2000;   // 消息只保留最近这么多条，防止 board.json 无限增长
 
 export class Board extends EventEmitter {
   /** @param {string} file board.json 路径；已存在则载入（Hub 重启续接） */
@@ -22,13 +23,19 @@ export class Board extends EventEmitter {
     this.peers = data?.peers || [];        // { name, kind, label, joined_at }；在线状态由 Hub 内存持有，不持久化
     this.mode = data?.mode || 'peer';      // peer（平等互联）| manager（管理者模式）
     this.manager = data?.manager || null;  // manager 模式下唯一能 create_task / cancel_task 的成员
+    // 管理者绑定到“当前在线的那个会话”：manager_instance 是成为管理者时的进程实例 id。
+    // 同一名字重新注册（进程重启、空闲回收、换会话）时实例变化，管理者会被清空，必须由人/成员重新指定。
+    this.managerInstance = data?.manager_instance || null;
+    this.managerPending = data?.manager_pending || false; // --manager 指定的名字：等它下一次注册时授予
     this.save();
   }
 
   save() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${crypto.randomBytes(3).toString('hex')}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ seq: this.seq, tasks: this.tasks, messages: this.messages, peers: this.peers, mode: this.mode, ...(this.manager ? { manager: this.manager } : {}) }, null, 1));
+    const data = { seq: this.seq, tasks: this.tasks, messages: this.messages, peers: this.peers, mode: this.mode };
+    if (this.manager) Object.assign(data, { manager: this.manager, manager_instance: this.managerInstance, manager_pending: this.managerPending });
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 1));
     for (let i = 0; ; i++) {
       try { fs.renameSync(tmp, this.file); return; }
       catch (e) { if (i >= 20) { try { fs.unlinkSync(tmp); } catch {} throw e; } Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); }
@@ -86,8 +93,10 @@ export class Board extends EventEmitter {
     return task;
   }
 
-  setManager(name) {
+  setManager(name, instance = null, pending = false) {
     this.manager = name;
+    this.managerInstance = instance;
+    this.managerPending = pending;
     this.save();
     this.emit('manager', name);
   }
@@ -98,19 +107,28 @@ export class Board extends EventEmitter {
     this.emit('mode', mode);
   }
 
-  /** 注册/更新成员（重连时刷新 kind/label）；在线状态由 Hub 维护 */
-  registerPeer({ name, kind = '', label = '' }) {
-    const p = this.peer(name);
-    if (p) { if (kind) p.kind = kind; if (label) p.label = label; }
-    else this.peers.push({ name, kind, label, joined_at: now() });
+  /** 注册/更新成员：secretHash + instance 是本次进程的凭据；recycled=true 表示复用了离线成员的旧名字 */
+  registerPeer({ name, kind = '', label = '', secretHash = null, instance = null, recycled = false }) {
+    let p = this.peer(name);
+    if (p) {
+      if (kind) p.kind = kind; if (label) p.label = label;
+      if (recycled) p.joined_at = now();
+    } else {
+      p = { name, kind, label, joined_at: now() };
+      this.peers.push(p);
+    }
+    if (secretHash) p.secret_hash = secretHash;
+    if (instance) p.instance = instance;
+    p.registered_at = now();
     this.save();
-    this.emit('peers', this.peer(name));
-    return this.peer(name);
+    this.emit('peers', p);
+    return p;
   }
 
   sendMessage({ from, to, content, task_id = null }) {
     const msg = { id: `M${++this.seq.msg}`, from, to, task_id, content, read: false, ts: now() };
     this.messages.push(msg);
+    if (this.messages.length > MAX_MESSAGES) this.messages.splice(0, this.messages.length - MAX_MESSAGES);
     this.save();
     this.emit('message', msg);
     return msg;

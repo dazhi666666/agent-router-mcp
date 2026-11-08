@@ -13,7 +13,26 @@ import { TERMINAL } from './board.mjs';
 
 export const TOOL_SCHEMAS = {
   join_space: {
-    description: `Join the collaboration space (the shared task board + mailbox). Call this ONLY when the user explicitly asks to join — e.g. "加入协作空间" / "join the collaboration space" — never on your own initiative: having this MCP installed does not make you a member, and other conversations of the same software stay unjoined. Joining registers you under your configured name (a suffix is added if it's taken), switches your tool set to the full board tools, and makes you visible on the board page. If the user asked you to LEAD the team, join first, then call become_manager.`,
+    description: `Join (or switch to) a collaboration space — a named task board + mailbox with its own members and manager. Call this ONLY when the user explicitly asks to join or switch — e.g. "加入协作空间" / "join the collaboration space" / "去火星空间" — never on your own initiative: having this MCP installed does not make you a member, and other conversations of the same software stay unjoined. Omit space to join the default space; pass a name to join that space (see list_spaces). Joining registers you under your configured name (a suffix is added only when a concurrent session already holds it), switches your tool set to that space's board tools, and makes you visible on its board page. If this workspace already joined before, a recycled MCP process restores its identity and space automatically on reconnect; a genuinely new concurrent session still needs this explicit call. If the user asked you to LEAD the team, join first, then call become_manager.`,
+    inputSchema: {
+      type: 'object',
+      properties: { space: { type: 'string', description: 'Space name (see list_spaces). Omit to join the default space.' } }
+    }
+  },
+  create_space: {
+    description: `Create a new named collaboration space and become its first member. A space is fully isolated: its own task board, mailbox, members and manager — tasks and messages never cross between spaces. Any member can create spaces; names are unique (Chinese is fine, up to 40 chars). mode "peer" (default) means everyone is equal; mode "manager" makes you the manager of the new space. After creating, you are switched into it.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Unique space name, e.g. "火星基地" or "release-2026"' },
+        label: { type: 'string', description: 'Optional human-friendly subtitle' },
+        mode: { type: 'string', enum: ['peer', 'manager'], description: 'peer (default, everyone equal) or manager (you become the manager)' }
+      },
+      required: ['name']
+    }
+  },
+  list_spaces: {
+    description: `List every collaboration space on this hub: name, label, mode, manager, member/task counts, and whether you have joined it. Use it to discover where to join or to check what you already belong to.`,
     inputSchema: { type: 'object', properties: {} }
   },
   get_roster: {
@@ -109,18 +128,22 @@ export const TOOL_SCHEMAS = {
   }
 };
 
-/** 未加入前 mcp-server 本地下发的唯一工具（Hub 侧永远不下发 join_space——成员无需它） */
-export const PRE_JOIN_TOOLS = [{ name: 'join_space', ...TOOL_SCHEMAS.join_space }];
+/** 与空间无关的工具：未加入任何空间也能用（join / create / list） */
+export const SPACE_AGNOSTIC_TOOLS = new Set(['join_space', 'create_space', 'list_spaces']);
+
+/** 未加入前 mcp-server 本地下发的工具（Hub 侧成员工具表也会包含这三个） */
+export const PRE_JOIN_TOOLS = [...SPACE_AGNOSTIC_TOOLS].map(name => ({ name, ...TOOL_SCHEMAS[name] }));
 
 /**
- * 某个成员可见的工具定义。
+ * 某个成员在某个空间里可见的工具定义。
  * @param {string} caller  成员名
- * @param {{ mode?: string, manager?: string|null }} opts
+ * @param {{ mode?: string, manager?: string|null, inSpace?: boolean }} opts
  */
-export function toolsFor(caller, { mode = 'peer', manager = null } = {}) {
+export function toolsFor(caller, { mode = 'peer', manager = null, inSpace = true } = {}) {
   return Object.entries(TOOL_SCHEMAS)
-    .filter(([name]) => name !== 'join_space')
+    .filter(([name]) => SPACE_AGNOSTIC_TOOLS.has(name) || inSpace)
     .filter(([name]) => {
+      if (SPACE_AGNOSTIC_TOOLS.has(name)) return true;
       if (mode === 'manager') {
         if (name === 'claim_task') return false;
         if ((name === 'create_task' || name === 'cancel_task') && caller !== manager) return false;
@@ -136,10 +159,30 @@ export function toolsFor(caller, { mode = 'peer', manager = null } = {}) {
  * @param {string} caller
  * @param {string} name
  * @param {object} args
- * @param {{ mode?: string, manager?: string|null, waiters?: Set<{check():boolean}>, onlineInfo?: (name:string)=>boolean }} ctx
+ * @param {{ mode?: string, manager?: string|null, waiters?: Set<{check():boolean}>, onlineInfo?: (name:string)=>boolean, registry?: any, callerInstance?: string|null }} ctx
  * @returns {object | Promise<object>}  wait_* 工具是异步的
  */
 export function callTool(board, caller, name, args = {}, ctx = {}) {
+  if (!TOOL_SCHEMAS[name]) return { error: `unknown tool ${name}` };
+
+  // 与空间无关的三个工具：不依赖当前空间，也不需要先加入
+  if (SPACE_AGNOSTIC_TOOLS.has(name)) {
+    const registry = ctx.registry;
+    if (!registry) return { error: `${name} requires a hub with multi-space support` };
+    if (name === 'list_spaces') return { default: registry.defaultSpace, spaces: registry.listSpaces(caller) };
+    if (name === 'join_space') {
+      const target = String(args.space || registry.defaultSpace).trim() || registry.defaultSpace;
+      const r = registry.joinSpace(target, caller);
+      if (r.error) return r;
+      return { ok: true, joined: r.joined, ...registry.spaceInfo(r.space, caller) };
+    }
+    // create_space
+    if (!args.name || !String(args.name).trim()) return { error: 'name is required' };
+    const r = registry.createSpace({ name: args.name, label: args.label ?? '', mode: args.mode || 'peer' }, caller, ctx.callerInstance || null);
+    if (r.error) return r;
+    return { ok: true, created: true, ...registry.spaceInfo(r.space, caller) };
+  }
+
   const mode = ctx.mode || board.mode;
   const manager = ctx.manager !== undefined ? ctx.manager : board.manager;
   const peerNames = board.peers.map(p => p.name);
@@ -150,8 +193,8 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
     if (name === 'claim_task') return { error: 'claim_task is only available in peer mode; in manager mode the manager assigns every task' };
     return null;
   };
-  if (!TOOL_SCHEMAS[name]) return { error: `unknown tool ${name}` };
   const gated = gate();
+  if (gated) return gated;
   if (gated) return gated;
   const denyWaiter = w => { ctx.waiters?.delete(w); };
 
@@ -202,7 +245,12 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
       const missing = (args.blocked_by || []).filter(id => !board.task(id));
       if (missing.length) return { error: `unknown blocked_by task(s): ${missing.join(', ')}` };
       const t = board.createTask({ title: args.title, spec: args.spec ?? '', assignee: args.assignee ?? null, blocked_by: args.blocked_by ?? [] }, caller);
-      return { id: t.id, title: t.title, assignee: t.assignee, status: t.status, note: t.assignee ? `assignment notice sent to ${t.assignee}'s inbox; you will be notified when it ends` : 'published as an open task; any member can claim_task it' };
+      const offline = t.assignee && t.assignee !== caller && ctx.onlineInfo && !ctx.onlineInfo(t.assignee);
+      return {
+        id: t.id, title: t.title, assignee: t.assignee, status: t.status,
+        note: t.assignee ? `assignment notice sent to ${t.assignee}'s inbox; you will be notified when it ends` : 'published as an open task; any member can claim_task it',
+        ...(offline ? { warning: `assignee ${t.assignee} is offline right now — the assignment waits in their inbox; it will be picked up when they reconnect, and no one else can take it while it is assigned` } : {})
+      };
     }
     case 'claim_task': {
       if (!args.task_id) return { error: 'task_id is required' };
@@ -236,11 +284,11 @@ export function callTool(board, caller, name, args = {}, ctx = {}) {
       if (ctx.claimClosed) return { error: 'manager self-claim is disabled on this hub (--claim closed); ask the human to designate the manager on the board page or via --manager' };
       if (mode === 'manager') {
         if (caller === manager) return { ok: true, mode, manager: caller, note: 'you are already the manager' };
-        board.setManager(caller);
+        board.setManager(caller, ctx.callerInstance || null);
         return { ok: true, mode, manager: caller, note: `you are now the manager (took over from ${manager || 'nobody'})` };
       }
       board.setMode('manager');
-      board.setManager(caller);
+      board.setManager(caller, ctx.callerInstance || null);
       return { ok: true, mode: 'manager', manager: caller, note: 'space switched to manager mode with you as manager; other members can no longer create tasks' };
     }
     case 'list_tasks':

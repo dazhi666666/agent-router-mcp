@@ -198,7 +198,7 @@ test('hub：网页指定主代理 / 切换模式 / become_manager 接任，广�
   // --claim closed：自封被拒
   const hub2 = await startHub(t, ['--claim', 'closed']);
   await reg(hub2, 'alice');
-  const res = await post(hub2.url, '/rpc', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'become_manager', arguments: {} } }, { ...auth(hub2), 'X-Agent': 'alice' });
+  const res = await post(hub2.url, '/rpc', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'become_manager', arguments: {} } }, { ...auth(hub2), 'X-Agent': 'alice', 'X-Agent-Secret': hub2.secrets.get('alice') });
   assert.match(JSON.parse(res.json.result.content[0].text).error, /--claim closed/);
 });
 
@@ -236,29 +236,52 @@ const startHub = async (t, extraArgs = []) => {
   }
   const c = connect();
   if (!c) throw new Error(`hub 未启动: ${stderr}`);
-  return { child, dataDir, url: c.url, token: c.token, stderr: () => stderr };
+  const spaces = await (await fetch(new URL('/api/spaces', c.url))).json().catch(() => ({}));
+  return { child, dataDir, url: c.url, token: c.token, stderr: () => stderr, secrets: new Map(), agentSpace: new Map(), defaultSpace: spaces.default || 'main' };
 };
 
 const auth = hub => ({ Authorization: `Bearer ${hub.token}` });
 const post = (url, p, bodyObj, headers = {}) =>
   fetch(new URL(p, url), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(bodyObj) })
     .then(async r => ({ status: r.status, json: await r.json().catch(() => null) }));
-const reg = (hub, name, kind = '') => post(hub.url, '/register', { name, kind }, auth(hub));
-const rpc = async (hub, agent, method, params = {}) => {
-  const r = await post(hub.url, '/rpc', { jsonrpc: '2.0', id: 1, method, params }, { ...auth(hub), 'X-Agent': agent });
+/** 注册身份并默认加入默认空间（join:false 时只注册，供多空间测试用） */
+const reg = async (hub, name, kind = '', { join = true } = {}) => {
+  const r = await post(hub.url, '/register', { name, kind }, auth(hub));
+  if (r.json?.name && r.json?.secret) hub.secrets.set(r.json.name, r.json.secret);
+  if (join && r.json?.name) r.join = await call(hub, r.json.name, 'join_space', {});
+  return r;
+};
+const rpc = async (hub, agent, method, params = {}, space = null) => {
+  const sp = space || hub.agentSpace.get(agent) || hub.defaultSpace;
+  const headers = {
+    ...auth(hub), 'X-Agent': encodeURIComponent(agent), 'X-Agent-Secret': hub.secrets.get(agent) || '',
+    ...(sp ? { 'X-Space': encodeURIComponent(sp) } : {})
+  };
+  const r = await post(hub.url, '/rpc', { jsonrpc: '2.0', id: 1, method, params }, headers);
   assert.equal(r.status, 200, `rpc ${method} → ${r.status} ${JSON.stringify(r.json)}`);
   return r.json.result;
 };
-const call = async (hub, agent, name, args = {}) => {
-  const res = await rpc(hub, agent, 'tools/call', { name, arguments: args });
-  assert.equal(res.isError, undefined, `${name} → ${res.content?.[0]?.text}`);
-  return JSON.parse(res.content[0].text);
+/** 工具调用：返回 { isError, value }；value 保持工具原始类型（数组/对象） */
+const callRaw = async (hub, agent, name, args = {}, space = null) => {
+  const res = await rpc(hub, agent, 'tools/call', { name, arguments: args }, space);
+  const value = JSON.parse(res.content[0].text);
+  if ((name === 'join_space' || name === 'create_space') && value.space) hub.agentSpace.set(agent, value.space);
+  return { isError: !!res.isError, value };
+};
+const call = async (hub, agent, name, args = {}, space = null) => {
+  const { isError, value } = await callRaw(hub, agent, name, args, space);
+  assert.ok(!isError, `${name} → ${value.error || JSON.stringify(value)}`);
+  return value;
 };
 
 // 起 mcp-server.mjs 子进程，返回逐行读 stdout 的句柄（MCP stdio 端到端用）
-const spawnMcp = (t, hub, name = 'claude-dev', kind = 'claude') => {
+// stateDir 默认每个实例一个临时目录；需要跨进程 resume 的测试传同一个目录
+const spawnMcp = (t, hub, name = 'claude-dev', kind = 'claude', stateDir = null) => {
   const child = spawn(process.execPath, [path.join(ROOT, 'mcp-server.mjs')], {
-    env: { ...process.env, AGENT_ROUTER_HUB_URL: hub.url, AGENT_ROUTER_TOKEN: hub.token, AGENT_ROUTER_AGENT: name, AGENT_ROUTER_KIND: kind },
+    env: {
+      ...process.env, AGENT_ROUTER_HUB_URL: hub.url, AGENT_ROUTER_TOKEN: hub.token,
+      AGENT_ROUTER_AGENT: name, AGENT_ROUTER_KIND: kind, AGENT_ROUTER_STATE_DIR: stateDir || tmp(t)
+    },
     stdio: ['pipe', 'pipe', 'pipe']
   });
   let stderr = '';
@@ -293,10 +316,10 @@ test('hub：注册命名——新名字、在线重名加后缀、离线重名�
   const hub = await startHub(t);
   const a1 = await reg(hub, 'claude', 'claude');
   assert.equal(a1.json.name, 'claude');
-  assert.equal(a1.json.mode, 'peer');
+  assert.equal(a1.join.mode, 'peer');
   assert.equal((await reg(hub, 'claude')).json.name, 'claude-2'); // 在线重名 → 后缀
-  await post(hub.url, '/heartbeat', { name: 'claude' }, auth(hub));
-  await post(hub.url, '/leave', { name: 'claude' }, auth(hub));
+  await post(hub.url, '/heartbeat', { name: 'claude' }, { ...auth(hub), 'X-Agent': 'claude', 'X-Agent-Secret': hub.secrets.get('claude') });
+  await post(hub.url, '/leave', { name: 'claude' }, { ...auth(hub), 'X-Agent': 'claude', 'X-Agent-Secret': hub.secrets.get('claude') });
   assert.equal((await reg(hub, 'claude')).json.name, 'claude');   // 离线重名 → 回收
   assert.equal((await post(hub.url, '/register', { name: 'x' }, { Authorization: 'Bearer wrong' })).status, 401);
   assert.equal((await post(hub.url, '/rpc', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { ...auth(hub), 'X-Agent': 'ghost' })).status, 403);
@@ -375,12 +398,12 @@ test('hub：开放任务广播、依赖就绪通知、页面取消', async t => 
 
 test('hub：manager 模式——第一个加入者成为管理者，工具按身份过滤', async t => {
   const hub = await startHub(t, ['--mode', 'manager']);
-  assert.equal((await reg(hub, 'zcode-main')).json.manager, 'zcode-main');
-  assert.equal((await reg(hub, 'codex-helper')).json.manager, 'zcode-main');
+  assert.equal((await reg(hub, 'zcode-main')).join.manager, 'zcode-main');
+  assert.equal((await reg(hub, 'codex-helper')).join.manager, 'zcode-main');
 
   const names = (await rpc(hub, 'codex-helper', 'tools/list')).tools.map(x => x.name);
   assert.ok(!names.includes('create_task') && !names.includes('claim_task'));
-  const errRes = await post(hub.url, '/rpc', { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'create_task', arguments: { title: 'x', assignee: 'codex-helper' } } }, { ...auth(hub), 'X-Agent': 'codex-helper' });
+  const errRes = await post(hub.url, '/rpc', { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'create_task', arguments: { title: 'x', assignee: 'codex-helper' } } }, { ...auth(hub), 'X-Agent': 'codex-helper', 'X-Agent-Secret': hub.secrets.get('codex-helper') });
   assert.match(JSON.parse(errRes.json.result.content[0].text).error, /only the manager/);
   await call(hub, 'zcode-main', 'create_task', { title: '总控任务', assignee: 'codex-helper' });
 });
@@ -422,7 +445,7 @@ test('MCP stdio 端到端：opt-in 加入 → 工具表变更 → 派活全链�
   send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const preList = JSON.parse(await nextLine());
   trace('pre-list ok');
-  assert.deepEqual(preList.result.tools.map(x => x.name), ['join_space']);
+  assert.deepEqual(preList.result.tools.map(x => x.name), ['join_space', 'create_space', 'list_spaces']);
   send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_roster', arguments: {} } });
   const denied = JSON.parse(await nextLine());
   trace('denied ok');
@@ -449,7 +472,7 @@ test('MCP stdio 端到端：opt-in 加入 → 工具表变更 → 派活全链�
   const full = JSON.parse(await nextLine());
   trace('post-list ok');
   const names = full.result.tools.map(x => x.name);
-  assert.ok(names.includes('create_task') && names.includes('wait_inbox') && !names.includes('join_space'));
+  assert.ok(names.includes('create_task') && names.includes('wait_inbox') && names.includes('join_space'));
 
   send({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'create_task', arguments: { title: '来自 MCP 的任务', spec: '验证 MCP 链路' } } });
   const created = JSON.parse(await nextLine());
@@ -519,4 +542,261 @@ test('MCP：加入后管理者/模式变更 → 宿主收到 tools/list_changed 
   const state = await (await fetch(new URL('/api/state', hub.url))).json();
   assert.equal(state.mode, 'manager');
   assert.equal(state.manager, 'claude-dev');
+});
+
+test('hub：per-peer secret —— 共享 token 也不能冒充别人（尤其 manager）', async t => {
+  const hub = await startHub(t);
+  await reg(hub, 'alice');
+  await reg(hub, 'bob');
+  const aliceSecret = hub.secrets.get('alice');
+  const bobSecret = hub.secrets.get('bob');
+  assert.ok(aliceSecret && bobSecret && aliceSecret !== bobSecret);
+
+  const rpcAs = (agent, secret) => post(hub.url, '/rpc',
+    { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    { ...auth(hub), 'X-Agent': agent, ...(secret === undefined ? {} : { 'X-Agent-Secret': secret }) });
+
+  assert.equal((await rpcAs('alice', aliceSecret)).status, 200);
+  assert.equal((await rpcAs('alice', bobSecret)).status, 401);   // 用 bob 的 secret 冒充 alice
+  assert.equal((await rpcAs('alice', undefined)).status, 401);   // 没带 secret
+  assert.equal((await rpcAs('ghost', 'whatever')).status, 403);  // 没注册
+
+  const hb = await post(hub.url, '/heartbeat', { name: 'alice' }, { ...auth(hub), 'X-Agent': 'alice', 'X-Agent-Secret': bobSecret });
+  assert.equal(hb.status, 401);
+  const lv = await post(hub.url, '/leave', { name: 'alice' }, { ...auth(hub), 'X-Agent': 'alice', 'X-Agent-Secret': bobSecret });
+  assert.equal(lv.status, 401);
+
+  const st = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.ok(st.peers.find(p => p.name === 'alice').online);          // 伪造的 leave 没生效
+  assert.equal(st.peers.find(p => p.name === 'alice').secret_hash, undefined); // 不泄露凭据
+});
+
+test('hub：resume 恢复原名；管理者随会话换代清空，不自动补位', async t => {
+  const hub = await startHub(t, ['--mode', 'manager']);
+  const first = await reg(hub, 'lead');
+  assert.equal(first.join.manager, 'lead');
+  assert.equal(first.json.resumed, false);
+  const leadSecret = hub.secrets.get('lead');
+
+  // 宿主回收会话（等价于 MCP 进程退出时的 /leave）
+  await post(hub.url, '/leave', { name: 'lead' }, { ...auth(hub), 'X-Agent': 'lead', 'X-Agent-Secret': leadSecret });
+
+  // 新进程带凭据 resume → 同名（凭据轮换）；管理者属于旧会话，重新加入时清空
+  const r = await post(hub.url, '/register', { name: 'lead', resume: { name: 'lead', secret: leadSecret } }, auth(hub));
+  assert.equal(r.status, 200);
+  assert.equal(r.json.resumed, true);
+  assert.equal(r.json.name, 'lead');
+  assert.ok(r.json.secret && r.json.secret !== leadSecret, 'resume 应轮换 secret');
+  hub.secrets.set('lead', r.json.secret);
+  const rejoin = await call(hub, 'lead', 'join_space', {});
+  assert.equal(rejoin.manager, null);
+
+  // 后续成员加入不会被自动补位成管理者
+  const other = await reg(hub, 'worker');
+  assert.equal(other.join.manager, null);
+  const st = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.equal(st.mode, 'manager');
+  assert.equal(st.manager, null);
+});
+
+test('hub：离线的后缀名优先复用，名字不再只增不减', async t => {
+  const hub = await startHub(t);
+  await reg(hub, 'z');
+  assert.equal((await reg(hub, 'z')).json.name, 'z-2'); // z 在线 → 后缀
+  await post(hub.url, '/leave', { name: 'z-2' }, { ...auth(hub), 'X-Agent': 'z-2', 'X-Agent-Secret': hub.secrets.get('z-2') });
+  assert.equal((await reg(hub, 'z')).json.name, 'z-2'); // z-2 离线 → 复用，而不是 z-3
+});
+
+test('MCP：宿主回收进程后，新进程静默 resume，工具表不退回 join_space', async t => {
+  const hub = await startHub(t);
+  const stateDir = tmp(t);
+  const m1 = spawnMcp(t, hub, 'claude-dev', 'claude', stateDir);
+  m1.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await m1.nextLine();
+  m1.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'join_space', arguments: {} } });
+  const joined = JSON.parse(JSON.parse(await m1.nextLine()).result.content[0].text);
+  assert.equal(joined.name, 'claude-dev');
+  await m1.nextLine(); // join 触发的 list_changed
+
+  m1.child.stdin.end(); // 触发 /leave 后退出
+  const closed = await Promise.race([new Promise(r => m1.child.once('exit', r)), sleep(4000).then(() => 'timeout')]);
+  assert.notEqual(closed, 'timeout', `m1 未退出；stderr: ${m1.stderr()}`);
+  await sleep(500);
+
+  const m2 = spawnMcp(t, hub, 'claude-dev', 'claude', stateDir);
+  m2.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await m2.nextLine();
+  m2.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' }); // 没有 join_space，直接 tools/list
+  const tools = JSON.parse(await m2.nextLine()).result.tools.map(x => x.name);
+  assert.ok(tools.includes('list_tasks') && tools.includes('wait_inbox') && tools.length > 3, `tools: ${tools}`);
+  assert.match(m2.stderr(), /resumed as "claude-dev"/);
+
+  m2.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_roster', arguments: {} } });
+  const roster = JSON.parse(JSON.parse(await m2.nextLine()).result.content[0].text);
+  assert.equal(roster.me, 'claude-dev');
+});
+
+test('MCP：wait_inbox 的 timeout_sec 大于 10 秒时不再误报 hub unavailable', async t => {
+  const hub = await startHub(t);
+  const mcp = spawnMcp(t, hub, 'idle-peer', 'zcode');
+  mcp.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await mcp.nextLine();
+  mcp.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'join_space', arguments: {} } });
+  await mcp.nextLine();
+  await mcp.nextLine();
+  mcp.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_inbox', arguments: {} } });
+  await mcp.nextLine();
+
+  const t0 = Date.now();
+  mcp.send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'wait_inbox', arguments: { timeout_sec: 12 } } });
+  const res = JSON.parse(await mcp.nextLine());
+  const elapsed = Date.now() - t0;
+  assert.equal(res.result.isError, undefined, JSON.stringify(res));
+  const val = JSON.parse(res.result.content[0].text);
+  assert.equal(val.timeout, true);
+  assert.ok(elapsed >= 11_500, `elapsed ${elapsed}ms — 仍在 10s 处提前返回`);
+});
+
+test('hub：--manager 指定的名字在下一次注册时获得管理者，随后换代即清空', async t => {
+  const hub = await startHub(t, ['--manager', 'lead']);
+  const first = await reg(hub, 'lead');
+  assert.equal(first.join.manager, 'lead');
+
+  await post(hub.url, '/leave', { name: 'lead' }, { ...auth(hub), 'X-Agent': 'lead', 'X-Agent-Secret': hub.secrets.get('lead') });
+  const second = await reg(hub, 'lead');
+  assert.equal(second.join.manager, null);
+});
+
+// ---------- 多空间 ----------
+test('spaces：agent 创建并命名空间，任务/消息按空间隔离', async t => {
+  const hub = await startHub(t);
+  await reg(hub, 'alice'); // 默认空间 main
+
+  const created = await call(hub, 'alice', 'create_space', { name: '火星基地', label: 'Mars base' });
+  assert.equal(created.space, '火星基地');
+  assert.equal(created.created, true);
+  assert.equal(created.joined, true);
+  assert.equal(created.mode, 'peer');
+
+  // create_space 后当前空间已经切过去
+  const task = await call(hub, 'alice', 'create_task', { title: '火星任务', assignee: 'alice' });
+  assert.equal(task.id, 'T1');
+  assert.equal((await call(hub, 'alice', 'list_tasks')).length, 1);
+
+  // 切回 main：另一块板，互不可见
+  const back = await call(hub, 'alice', 'join_space', { space: 'main' });
+  assert.equal(back.space, 'main');
+  assert.deepEqual(await call(hub, 'alice', 'list_tasks'), []);
+
+  const ls = await call(hub, 'alice', 'list_spaces');
+  assert.equal(ls.default, 'main');
+  assert.deepEqual(ls.spaces.map(s => s.name).sort(), ['main', '火星基地'].sort());
+  assert.ok(ls.spaces.every(s => s.joined === true));
+
+  const dup = await callRaw(hub, 'alice', 'create_space', { name: '火星基地' });
+  assert.equal(dup.isError, true);
+  assert.match(dup.value.error, /already exists/);
+
+  const spaced = await call(hub, 'alice', 'create_space', { name: 'Mars Base' });
+  assert.equal(spaced.space, 'Mars-Base'); // 空白折叠成 '-'
+
+  const stMars = await (await fetch(new URL('/api/state?space=' + encodeURIComponent('火星基地'), hub.url))).json();
+  assert.equal(stMars.space, '火星基地');
+  assert.deepEqual(stMars.tasks.map(x => x.id), ['T1']);
+  const stMain = await (await fetch(new URL('/api/state?space=main', hub.url))).json();
+  assert.deepEqual(stMain.tasks, []);
+});
+
+test('spaces：成员资格按空间隔离；manager 只属于创建它的空间', async t => {
+  const hub = await startHub(t);
+  await reg(hub, 'alice');
+  await reg(hub, 'bob'); // 两人都在 main
+
+  const ops = await call(hub, 'alice', 'create_space', { name: 'ops', mode: 'manager' });
+  assert.equal(ops.mode, 'manager');
+  assert.equal(ops.manager, 'alice');
+
+  // bob 不是 ops 成员：工具表退回 3 个空间工具，板工具被拒
+  const names0 = (await rpc(hub, 'bob', 'tools/list', {}, 'ops')).tools.map(x => x.name);
+  assert.deepEqual(names0, ['join_space', 'create_space', 'list_spaces']);
+  const denied = await callRaw(hub, 'bob', 'list_tasks', {}, 'ops');
+  assert.equal(denied.isError, true);
+  assert.match(denied.value.error, /not a member of space "ops"/);
+
+  // bob 加入 ops：看到 alice 是 manager，自己不是 → 没有 create_task / claim_task
+  const joined = await call(hub, 'bob', 'join_space', { space: 'ops' });
+  assert.equal(joined.manager, 'alice');
+  const names = (await rpc(hub, 'bob', 'tools/list', {}, 'ops')).tools.map(x => x.name);
+  assert.ok(!names.includes('create_task') && !names.includes('claim_task'));
+  const denied2 = await callRaw(hub, 'bob', 'create_task', { title: 'x', assignee: 'bob' }, 'ops');
+  assert.equal(denied2.isError, true);
+  assert.match(denied2.value.error, /only the manager \(alice\)/);
+
+  const task = await call(hub, 'alice', 'create_task', { title: 'ops task', assignee: 'bob' }, 'ops');
+  assert.equal(task.id, 'T1');
+  assert.deepEqual(await call(hub, 'bob', 'list_tasks', {}, 'main'), []); // main 不受影响
+});
+
+test('spaces：名字校验 / 数量上限 / 页面新建', async t => {
+  const hub = await startHub(t, ['--max-spaces', '2']);
+  await reg(hub, 'alice');
+  const bad = await callRaw(hub, 'alice', 'create_space', {});
+  assert.equal(bad.isError, true);
+  assert.match(bad.value.error, /name is required/);
+  assert.equal((await call(hub, 'alice', 'create_space', { name: 'a' })).space, 'a');
+  const over = await callRaw(hub, 'alice', 'create_space', { name: 'b' });
+  assert.equal(over.isError, true);
+  assert.match(over.value.error, /limit reached/);
+
+  // 人类从页面新建：空空间，等 agent 加入
+  const hub2 = await startHub(t);
+  const r = await post(hub2.url, '/api/spaces', { name: 'page-space' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.name, 'page-space');
+  const pub = await (await fetch(new URL('/api/spaces', hub2.url))).json();
+  assert.deepEqual(pub.spaces.map(s => s.name).sort(), ['main', 'page-space']);
+  assert.equal(pub.spaces.find(s => s.name === 'page-space').members, 0);
+});
+
+test('MCP：list_spaces 不注册；create_space 自动切换；两个空间互不可见', async t => {
+  const hub = await startHub(t);
+  const a = spawnMcp(t, hub, 'alice-mcp', 'zcode');
+  a.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await a.nextLine();
+  a.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  assert.deepEqual(JSON.parse(await a.nextLine()).result.tools.map(x => x.name), ['join_space', 'create_space', 'list_spaces']);
+  // list_spaces 不需要注册
+  a.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_spaces', arguments: {} } });
+  const ls = JSON.parse(JSON.parse(await a.nextLine()).result.content[0].text);
+  assert.deepEqual(ls.spaces.map(s => s.name), ['main']);
+  let st = await (await fetch(new URL('/api/state', hub.url))).json();
+  assert.deepEqual(st.peers, []); // 没有注册、没有占名、没有成员
+
+  // 加入 main，然后创建并命名新空间
+  a.send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'join_space', arguments: {} } });
+  await a.nextLine(); await a.nextLine(); // 响应 + list_changed
+  a.send({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'create_space', arguments: { name: 'mcp-space' } } });
+  const created = JSON.parse(JSON.parse(await a.nextLine()).result.content[0].text);
+  assert.equal(created.space, 'mcp-space');
+  await a.nextLine(); // list_changed
+  a.send({ jsonrpc: '2.0', id: 6, method: 'tools/list' });
+  const names = JSON.parse(await a.nextLine()).result.tools.map(x => x.name);
+  assert.ok(names.includes('create_task') && names.includes('list_tasks'));
+
+  a.send({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'create_task', arguments: { title: 'inside', assignee: 'alice-mcp' } } });
+  assert.equal(JSON.parse(JSON.parse(await a.nextLine()).result.content[0].text).id, 'T1');
+
+  // 另一个 agent 在 main 看不到；加入 mcp-space 后能看到
+  const b = spawnMcp(t, hub, 'bob-mcp', 'zcode');
+  b.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await b.nextLine();
+  b.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'join_space', arguments: {} } });
+  await b.nextLine(); await b.nextLine();
+  b.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_tasks', arguments: {} } });
+  assert.deepEqual(JSON.parse(JSON.parse(await b.nextLine()).result.content[0].text), []);
+  b.send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'join_space', arguments: { space: 'mcp-space' } } });
+  await b.nextLine(); await b.nextLine();
+  b.send({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'list_tasks', arguments: {} } });
+  const bobTasks = JSON.parse(JSON.parse(await b.nextLine()).result.content[0].text);
+  assert.deepEqual(bobTasks.map(x => x.id), ['T1']);
 });
